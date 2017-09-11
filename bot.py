@@ -68,8 +68,14 @@ db = None
 cwd = os.path.dirname(os.path.abspath(__file__))
 INIT_SCRIPT = """
 DROP TABLE IF EXISTS test;
+DROP TABLE IF EXISTS requests;
 CREATE TABLE test (
 	c integer
+);
+CREATE TABLE requests (
+	id INTEGER PRIMARY KEY,
+	timestamp INTEGER,
+	response TEXT
 );
 """
 
@@ -85,14 +91,25 @@ class TickerThread(threading.Thread):
 			db.cursor().executescript(INIT_SCRIPT)
 			print "init db"
 
+	def getTicker(self):
+		global db
+		timestamp = int(time.time())
+		response = requests.get("https://api.coinmarketcap.com/v1/ticker?limit=3")
+		db.cursor().execute("INSERT INTO requests(timestamp, response) VALUES (?, ?)", (timestamp, response.content))
+		db.commit()
+
 	def run(self):
 		global db
 		self.initDb()
-		while self.i < 10:
+		while self.i < 3:
 			print self.i
 			db.cursor().execute("INSERT INTO test(c) VALUES (?)", (self.i,))
 			db.commit()
 			self.i += 1
+			self.getTicker()
+			print "sleeping for 10"
+			time.sleep(5)
+
 		print "done"
 
 if __name__ == '__main__':
