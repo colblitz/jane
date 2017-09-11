@@ -1,0 +1,12 @@
+break up responses into rows and save into parsed table
+rebalancer
+ - get mapping of balance in usd/btc
+ - pick a distribution (flat? dynamic? from db?)
+ - calculate target distribution
+ - calculate diffs
+ - orders for diffs
+trader
+ - train (constantly training? retrain every so often?)
+ - predictors - up or down, how much, percentage chance
+ - suite of predictors to actions
+ - genetic parameters
