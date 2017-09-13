@@ -27,25 +27,30 @@ import config
 # 	# "symbol"
 # 	# "total_supply"
 
-# nonce = int(time.time());
-# url = "https://bittrex.com/api/v1.1/account/getbalances?apikey=%s&nonce=%d" % (config.READONLY_API_KEY, nonce)
-# print url
+def log(s):
+	if True:
+		print "[%d] %s" % (int(time.time()), s)
 
-# sign = hmac.new(config.READONLY_API_SECRET, url, hashlib.sha512);
-# r = requests.get(url, headers={'apisign': sign.hexdigest()})
-# # pprint(r.json())
-# if not r.json()["success"]:
-# 	print r.json()["message"]
+def getBalance():
+	nonce = int(time.time());
+	url = "https://bittrex.com/api/v1.1/account/getbalances?apikey=%s&nonce=%d" % (config.READONLY_API_KEY, nonce)
+	log(url)
 
-# balances = {}
-# for details in r.json()["result"]:
-# 	available = details["Available"]
-# 	balance = details["Balance"]
-# 	address = details["CryptoAddress"]
-# 	currency = details["Currency"]
-# 	pending = details["Pending"]
-# 	print balance, available, pending, currency, address
-# 	balances[currency] = balance
+	sign = hmac.new(config.READONLY_API_SECRET, url, hashlib.sha512);
+	r = requests.get(url, headers={'apisign': sign.hexdigest()})
+	if not r.json()["success"]:
+		log(r.json()["message"])
+		return None
+
+	balances = {}
+	for details in r.json()["result"]:
+		available = details["Available"]
+		balance = details["Balance"]
+		address = details["CryptoAddress"]
+		currency = details["Currency"]
+		pending = details["Pending"]
+		print balance, available, pending, currency, address
+		balances[currency] = balance
 
 # print ""
 # print "in usd:"
@@ -64,52 +69,57 @@ import config
 
 # import sqlite3
 # conn = sqlite3.connect('Database/testDB.db')
-db = None
-cwd = os.path.dirname(os.path.abspath(__file__))
 INIT_SCRIPT = """
-DROP TABLE IF EXISTS test;
 DROP TABLE IF EXISTS requests;
-CREATE TABLE test (
-	c integer
-);
 CREATE TABLE requests (
 	id INTEGER PRIMARY KEY,
 	timestamp INTEGER,
 	response TEXT
 );
+
 """
 
+def getDb(dbFile):
+	existed = False
+	if os.path.isfile(dbFile):
+		existed = True
+
+	cwd = os.path.dirname(os.path.abspath(__file__))
+	db = sqlite3.connect(cwd + "/" + dbFile)
+
+	if not existed:
+		print "db created, running init script"
+		db.cursor().executescript(INIT_SCRIPT)
+	return db
+
+TICKER_URL = "https://api.coinmarketcap.com/v1/ticker?limit=%d"
+TICKER_LIMIT = 10
+TICKER_INTERVAL = 5
+
+def getTicker(n):
+	timestamp = int(time.time())
+	response = requests.get(TICKER_URL % n)
+	return timestamp, response
+
+def parseTicker(response):
+	response.content
+
+def saveRawTickerResponse(db, timestamp, response):
+	db.cursor().execute("INSERT INTO requests(timestamp, response) VALUES (?, ?)", (timestamp, response.content))
+	db.commit()
+
 class TickerThread(threading.Thread):
-	i = 0
-	# db
-
-	def initDb(self):
-		global db
-		if not db:
-			db = sqlite3.connect(cwd + "/" + config.DB_FILE_TICKER_RAW)
-			db.row_factory = sqlite3.Row
-			db.cursor().executescript(INIT_SCRIPT)
-			print "init db"
-
-	def getTicker(self):
-		global db
-		timestamp = int(time.time())
-		response = requests.get("https://api.coinmarketcap.com/v1/ticker?limit=3")
-		db.cursor().execute("INSERT INTO requests(timestamp, response) VALUES (?, ?)", (timestamp, response.content))
-		db.commit()
-
 	def run(self):
-		global db
-		self.initDb()
-		while self.i < 3:
-			print self.i
-			db.cursor().execute("INSERT INTO test(c) VALUES (?)", (self.i,))
-			db.commit()
-			self.i += 1
-			self.getTicker()
-			print "sleeping for 10"
-			time.sleep(5)
+		rawDB = getDb(config.DB_FILE_TICKER_RAW)
+		parsedDB = getDb(config.DB_FILE_TICKER_FORMATTED)
 
+		i = 0
+		while i < 3:
+			timestamp, response = getTicker(TICKER_LIMIT)
+			saveRawTickerResponse(rawDB, timestamp, response)
+			i += 1
+			print "sleeping"
+			time.sleep(5)
 		print "done"
 
 if __name__ == '__main__':
