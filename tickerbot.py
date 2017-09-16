@@ -13,7 +13,7 @@ def log(s):
 
 TICKER_URL = "https://api.coinmarketcap.com/v1/ticker?limit=%d"
 TICKER_LIMIT = 200
-TICKER_INTERVAL = 1 * 60
+TICKER_INTERVAL = 5 * 60
 
 INIT_SCRIPT = """
 DROP TABLE IF EXISTS responses;
@@ -124,8 +124,8 @@ def saveRawTickerResponse(db, timestamp, response):
 		(timestamp, response.status_code, response.content))
 	db.commit()
 
-i = 0
-while i < 5:
+while 1:
+	log("Making request")
 	timestamp, response = getTicker(TICKER_LIMIT)
 	if response:
 		db = getDb(config.DB_FILE_TICKER)
@@ -138,11 +138,8 @@ while i < 5:
 			trackStatus(5)
 		else:
 			trackStatus(0)
+			log("Success")
 		db.close()
 	else:
 		trackStatus(1)
-
 	time.sleep(TICKER_INTERVAL)
-	i += 1
-
-print "asdf"
