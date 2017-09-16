@@ -74,11 +74,12 @@ def trackStatus(r):
 
 def getDb(dbFile):
 	existed = False
-	if os.path.isfile(cwd + "/" + dbFile):
+	cwd = os.path.dirname(os.path.abspath(__file__))
+	absDb = cwd + "/" + dbFile
+	if os.path.isfile(absDb):
 		existed = True
 
-	cwd = os.path.dirname(os.path.abspath(__file__))
-	db = sqlite3.connect(cwd + "/" + dbFile)
+	db = sqlite3.connect(absDb)
 
 	if not existed:
 		print "db created, running init script"
