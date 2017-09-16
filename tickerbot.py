@@ -4,12 +4,14 @@ import sqlite3
 import os
 import json
 import threading
+import sys
 
 import config
 
 def log(s):
 	if True:
 		print "[%d] %s" % (int(time.time()), str(s))
+		sys.stdout.flush()
 
 TICKER_URL = "https://api.coinmarketcap.com/v1/ticker?limit=%d"
 TICKER_LIMIT = 200
@@ -72,7 +74,7 @@ def trackStatus(r):
 
 def getDb(dbFile):
 	existed = False
-	if os.path.isfile(dbFile):
+	if os.path.isfile(cwd + "/" + dbFile):
 		existed = True
 
 	cwd = os.path.dirname(os.path.abspath(__file__))
