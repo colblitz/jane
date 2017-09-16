@@ -5,6 +5,8 @@ import os
 import json
 import threading
 
+import config
+
 def log(s):
 	if True:
 		print "[%d] %s" % (int(time.time()), str(s))
