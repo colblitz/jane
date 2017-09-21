@@ -51,6 +51,7 @@ CREATE TABLE trade_log (
 	type TEXT,
 	quantity REAL,
 	price REAL,
+	subtotal REAL,
 	fee REAL,
 	total REAL
 );
@@ -70,15 +71,36 @@ def getDb(dbFile):
 		db.cursor().executescript(INIT_SCRIPT)
 	return db
 
-def query_db(db, query, args=(), one=False):
+db = getDb(config.DB_FILE_LOG)
+
+def query_db(query, args=(), one=False):
 	cur = db.execute(query, args)
 	rv = cur.fetchall()
 	cur.close()
 	return (rv[0] if rv else None) if one else rv
 
 def getPortfolioValue():
-	db = getDb(config.DB_FILE_LOG)
-	return query_db(db, "SELECT sum(amount_usd) AS amount FROM transfer_log")[0][0]
+	return query_db("SELECT sum(amount_usd) AS amount FROM transfer_log")[0][0]
+
+def insertManualValue(amt_usd, amt_btc):
+	db.cursor().execute(
+		"INSERT INTO transfer_log(timestamp, type, amount_usd, amount_btc) VALUES (?,?,?,?)",
+		(int(time.time()), "MANUAL", float(amt_usd), float(amt_btc)))
+	db.commit()
+
+def insertTransfer(type, amt_usd, amt_btc, fee_usd, fee_btc):
+	db.cursor().execute(
+		"INSERT INTO transfer_log(timestamp, type, amount_usd, amount_btc, fee_usd, fee_btc) VALUES (?,?,?,?,?,?)",
+		(int(time.time()), type, float(amt_usd), float(amt_btc), float(fee_usd), float(fee_btc)))
+	db.commit()
+
+def insertTrade(exchange, ttype, quantity, price, fee):
+	st = float(quantity) * price
+	db.cursor().execute(
+		"INSERT INTO trade_log(timestamp, exchange, type, quantity, price, subtotal, fee, total) VALUES (?,?,?,?,?,?,?,?)",
+		(int(time.time()), exchange, ttype, float(quantity), float(price), st, float(fee), st + fee))
+	db.commit()
+
 
 ###########################
 ####  BITTREX METHODS  ####
@@ -138,7 +160,7 @@ def getOpenOrders():
 		"",
 		[])
 
-def placeOrder(url, market, quantity, rate, timeout):
+def placeOrder(ttype, url, market, quantity, rate, timeout):
 	r = makeBittrexRequest(
 		url,
 		"market={}&quantity={:.8f}&rate={:.8f}",
@@ -146,18 +168,19 @@ def placeOrder(url, market, quantity, rate, timeout):
 	uuid = r['uuid']
 	log("Created order with uuid: " + uuid)
 	time.sleep(timeout)
-	if getOrderDetails(uuid)['IsOpen']:
+	orderDetails = getOrderDetails(uuid)
+	if orderDetails['IsOpen']:
 		cancelOrder(uuid)
 		return False
 	else:
-		# TODO: log to db
+		insertTrade(market, ttype, quantity, rate, orderDetails['CommissionPaid'])
 		return True
 
 def placeLimitSell(market, quantity, rate, timeout):
-	return placeOrder("https://bittrex.com/api/v1.1/market/selllimit", market, quantity, rate, timeout)
+	return placeOrder("LIMIT SELL", "https://bittrex.com/api/v1.1/market/selllimit", market, quantity, rate, timeout)
 
-def placeLimitBuy(market, quantity, rate, timeout)
-	return placeOrder("https://bittrex.com/api/v1.1/market/buylimit", market, quantity, rate, timeout)
+def placeLimitBuy(market, quantity, rate, timeout):
+	return placeOrder("LIMIT BUY", "https://bittrex.com/api/v1.1/market/buylimit", market, quantity, rate, timeout)
 
 ########################
 ####  OTHER THINGS  ####
@@ -189,8 +212,8 @@ def getTargetAmounts(coinValuesUSD, allocation, pv):
 		targets[coin] = targetCoinAmount
 	return targets
 
-def rebalance():
-	# TODO: transfer btc from coinbase
+if __name__ == "__main__":
+	# TODO: check if coinbase has btc, if so, transfer
 
 	balance = getBalance()
 	if balance:
@@ -200,6 +223,7 @@ def rebalance():
 	print ""
 
 	coinValuesUSD = getCoinValuesUSD()
+
 	allocation = getAllocation(coinValuesUSD, balance)
 	print allocation
 	print ""
@@ -228,14 +252,11 @@ def rebalance():
 			c,
 			coinValuesUSD[c],
 			values[c])
-	return values
+
+
+	# return values
 
 	# make orders
 	# some sort of retry/step down of orders
 
 	# send profits out
-
-
-# rebalance()
-
-# getOrderDetails("9c8b3048-e808-47a3-a2d3-9aebf6ce893d")
