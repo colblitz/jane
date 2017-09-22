@@ -5,6 +5,8 @@ import time
 import sqlite3
 import threading
 import os
+import uuid
+import sys
 from decimal import *
 
 from coinbase.wallet.client import Client
@@ -88,6 +90,12 @@ def insertManualValue(amt_usd, amt_btc):
 		(int(time.time()), "MANUAL", float(amt_usd), float(amt_btc)))
 	db.commit()
 
+def insertProfitValue(amt_usd, amt_btc):
+	db.cursor().execute(
+		"INSERT INTO transfer_log(timestamp, type, amount_usd, amount_btc) VALUES (?,?,?,?)",
+		(int(time.time()), "PROFIT", float(amt_usd), float(amt_btc)))
+	db.commit()
+
 def insertTransfer(type, amt_usd, amt_btc, fee_usd, fee_btc):
 	db.cursor().execute(
 		"INSERT INTO transfer_log(timestamp, type, amount_usd, amount_btc, fee_usd, fee_btc) VALUES (?,?,?,?,?,?)",
@@ -101,6 +109,55 @@ def insertTrade(exchange, ttype, quantity, price, fee):
 		(int(time.time()), exchange, ttype, float(quantity), float(price), st, float(fee), st + fee))
 	db.commit()
 
+############################
+####  COINBASE METHODS  ####
+############################
+
+client = Client(
+	config.COINBASE_API_KEY,
+	config.COINBASE_API_SECRET,
+	api_version='2017-04-13'
+)
+
+# {
+#   "balance": {
+#     "amount": "0.22940912",
+#     "currency": "BTC"
+#   },
+#   "created_at": "2017-06-05T22:17:58Z",
+#   "currency": "BTC",
+#   "id": "ef5f8ef6-58ba-5a75-84c2-54765c1bac3d",
+#   "name": "BTC Wallet",
+#   "native_balance": {
+#     "amount": "812.60",
+#     "currency": "USD"
+#   },
+#   "primary": true,
+#   "resource": "account",
+#   "resource_path": "/v2/accounts/ef5f8ef6-58ba-5a75-84c2-54765c1bac3d",
+#   "type": "wallet",
+#   "updated_at": "2017-09-18T16:27:35Z"
+# }
+
+class CoinbaseAccount:
+	def __init__(self, client, response):
+		# TODO
+		self.balance = response["balance"]["amount"]
+		self.id = response["id"]
+		self.client = client
+
+	def sendBTC(self, address, amount):
+		if amount > self.balance:
+			return
+		return self.client.send_money(
+			self.id,
+			to = address,
+			amount = str(amount),
+			currency = 'BTC',
+			idem = uuid.uuid1())
+
+def getAccount():
+	return CoinbaseAccount(client, client.get_primary_account())
 
 ###########################
 ####  BITTREX METHODS  ####
@@ -116,11 +173,11 @@ def makeBittrexRequest(endpoint, urlargs, args):
 	log("GET: " + url)
 
 	sign = hmac.new(config.BITTREX_API_SECRET, url, hashlib.sha512)
-	# response = requests.get(url, headers={'apisign': sign.hexdigest()})
-	# if not response.json()["success"]:
-	# 	log(response.json()["message"])
-	# 	return None
-	# return response.json()['result']
+	response = requests.get(url, headers={'apisign': sign.hexdigest()})
+	if not response.json()["success"]:
+		log(response.json()["message"])
+		return None
+	return response.json()['result']
 
 # ex: getMarket("BTC-ARK")
 # returns : {u'Ask': 0.00098, u'Bid': 0.00097114, u'Last': 0.00098}
@@ -161,10 +218,10 @@ def getOpenOrders():
 		[])
 
 def placeOrder(ttype, url, market, quantity, rate, timeout):
-	r = makeBittrexRequest(
-		url,
-		"market={}&quantity={:.8f}&rate={:.8f}",
-		[market, quantity, rate])
+	# r = makeBittrexRequest(
+	# 	url,
+	# 	"market={}&quantity={:.8f}&rate={:.8f}",
+	# 	[market, quantity, rate])
 	# uuid = r['uuid']
 	# log("Created order with uuid: " + uuid)
 	time.sleep(timeout)
@@ -256,20 +313,38 @@ def getTargetAmounts(coinValuesUSD, allocation, pv):
 		targets[coin] = targetCoinAmount
 	return targets
 
+def tryToMakeOrder(coin, amount):
+	marketValues = getMarket("BTC-"+coin)
+	if marketValues:
+		ask = marketValues['Ask']
+		bid = marketValues['Bid']
+		step = (ask - bid) / float(config.ORDER_RETRIES)
+
+		tryRate = ask if amount > 0 else bid
+		i = 0
+		while i < config.ORDER_RETRIES:
+			# TODO - re-look up market?
+			if amount > 0 and placeLimitSell("BTC-" + coin, amount, tryRate, 60):
+				break
+			elif amount < 0 and placeLimitBuy("BTC-" + coin, amount, tryRate, 60):
+				break
+			tryRate -= (step if amount > 0 else (-1 * step))
+			i += 1
+	else:
+		# TODO
+		pass
+
 def makeOrders(balance, targets):
 	for c in targets:
-		t = targets[c]
-		h = balance.get(c, 0)
-		d = t - h
+		t = Decimal(targets[c])
+		h = Decimal(balance.get(c, 0))
+		d = Decimal(t - h)
 		print c, d
 		if c == "BTC":
 			# TODO
 			continue
-		if abs(d) > h * 0.05:
-			if d > 0:
-				placeLimitSell("BTC-" + c, abs(d), 2, 2)
-			else:
-				placeLimitBuy("BTC-" + c, abs(d), 2, 2)
+		if abs(d) > h * Decimal(0.05):
+			tryToMakeOrder(d)
 
 tab = "   "
 
@@ -302,53 +377,56 @@ def logAllocation(allocation, balance, targets):
 		# log(tab + c[0] + ": " + str(c[1]))
 
 
-def logPortfolio(pv):
-	if pv:
-		log("Supposed PV:")
-		log(tab + str(pv))
-	else:
-		log("##### No pv")
+def logPortfolio(av, sv):
+	log("Portfolio Value:")
+	log(tab + "Supposed: " + str(sv))
+	log(tab + "  Actual: " + str(av))
 
 if __name__ == "__main__":
-	# TODO: check if coinbase has btc, if so, transfer
+	coinValuesUSD, allDetails = getCoinValuesUSD()
+
+	# TODO: check if coinbase has btc, if so, transfer in
+	coinbase = getAccount()
 
 	balance = getBalance()
 	logBalance(balance)
 
-	pv = getPortfolioValue()
-	logPortfolio(pv)
+	actualValue = Decimal(0.0)
+	for c in balance:
+		actualValue += balance[c] * coinValuesUSD[c]
 
-	coinValuesUSD, allDetails = getCoinValuesUSD()
+	supposedValue = getPortfolioValue()
+	logPortfolio(actualValue, supposedValue)
+
+	moveAmount = 0
+	if actualValue - supposedValue > config.TRANSFER_THRESHOLD:
+		profit = actualValue - supposedValue
+		moveAmount = profit * (1 - config.PROFIT_RATIO_TO_KEEP)
+		keepAmount = profit * config.PROFIT_RATIO_TO_KEEP
+		insertProfitValue(keepAmount, keepAmount / coinValuesUSD['BTC'])
+	elif actualValue - supposedValue < -1 * config.TRANSFER_THRESHOLD:
+		# TODO: buy more or do nothing
+		pass
+
+	# insertManualValue(4000, 4000 / coinValuesUSD['BTC'])
 
 	allocation = getAllocation(allDetails, balance)
-	targets = getTargetAmounts(coinValuesUSD, allocation, pv)
+	targets = getTargetAmounts(coinValuesUSD, allocation, supposedValue)
 	logAllocation(allocation, balance, targets)
 
-	makeOrders(balance, targets)
+	# makeOrders(balance, targets)
 
-	# for c in targets:
-	# 	print "%s: target %f, have %f" % (
-	# 		c,
-	# 		targets[c],
-	# 		balance.get(c, 0))
+	# TODO: send profits out
+	if moveAmount > 0:
+		# transfer to coinbase
+		# transfer to bank
+		pass
 
-	# print ""
-	# values = {}
-	# for coin in balance:
-	# 	coinAmount = balance[coin]
-	# 	coinValue = coinValuesUSD[coin] * coinAmount
-	# 	values[coin] = coinValue
-	# for c in values:
-	# 	print "%f %s at %f per = %f total" % (
-	# 		balance.get(c, 0),
-	# 		c,
-	# 		coinValuesUSD[c],
-	# 		values[c])
+	# Check speculation
 
 
-	# return values
 
-	# make orders
-	# some sort of retry/step down of orders
 
-	# send profits out
+
+
+
