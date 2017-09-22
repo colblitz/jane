@@ -1,11 +1,11 @@
 rebalancer
- - better target distribution
- - calculate diffs
- - orders for diffs
  - execute orders with some retry logic
  - deal with any profits
  - coinbase transfers
  - methods for logging things
+ - BCH is BCC on bittrex
+ - check if market exists first - MIOTA
+ - dev/prod variable in config
 trader
  - train (constantly training? retrain every so often?)
  - predictors - up or down, how much, percentage chance

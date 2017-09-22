@@ -116,11 +116,11 @@ def makeBittrexRequest(endpoint, urlargs, args):
 	log("GET: " + url)
 
 	sign = hmac.new(config.BITTREX_API_SECRET, url, hashlib.sha512)
-	response = requests.get(url, headers={'apisign': sign.hexdigest()})
-	if not response.json()["success"]:
-		log(response.json()["message"])
-		return None
-	return response.json()['result']
+	# response = requests.get(url, headers={'apisign': sign.hexdigest()})
+	# if not response.json()["success"]:
+	# 	log(response.json()["message"])
+	# 	return None
+	# return response.json()['result']
 
 # ex: getMarket("BTC-ARK")
 # returns : {u'Ask': 0.00098, u'Bid': 0.00097114, u'Last': 0.00098}
@@ -165,16 +165,16 @@ def placeOrder(ttype, url, market, quantity, rate, timeout):
 		url,
 		"market={}&quantity={:.8f}&rate={:.8f}",
 		[market, quantity, rate])
-	uuid = r['uuid']
-	log("Created order with uuid: " + uuid)
+	# uuid = r['uuid']
+	# log("Created order with uuid: " + uuid)
 	time.sleep(timeout)
-	orderDetails = getOrderDetails(uuid)
-	if orderDetails['IsOpen']:
-		cancelOrder(uuid)
-		return False
-	else:
-		insertTrade(market, ttype, quantity, rate, orderDetails['CommissionPaid'])
-		return True
+	# orderDetails = getOrderDetails(uuid)
+	# if orderDetails['IsOpen']:
+	# 	cancelOrder(uuid)
+	# 	return False
+	# else:
+	# 	insertTrade(market, ttype, quantity, rate, orderDetails['CommissionPaid'])
+	# 	return True
 
 def placeLimitSell(market, quantity, rate, timeout):
 	return placeOrder("LIMIT SELL", "https://bittrex.com/api/v1.1/market/selllimit", market, quantity, rate, timeout)
@@ -189,19 +189,63 @@ def placeLimitBuy(market, quantity, rate, timeout):
 def getCoinValuesUSD():
 	response = requests.get(TICKER_URL % TICKER_LIMIT)
 	values = {}
+	allDetails = {}
 	for details in response.json():
 		values[details["symbol"]] = Decimal(str(details["price_usd"]))
-	return values
+		allDetails[details['symbol']] = details
+	return values, allDetails
+
+def normalize(m):
+	normalized = {}
+	total = float(sum(m.values()))
+	for k in m:
+		normalized[k] = float(m[k]) / total
+	return normalized
 
 # Return map of symbol to value percentage
-def getAllocation(coinValuesUSD, balance):
+def getAllocation(coinDetails, balance):
 	# equal distribution of top 20
 	allocation = {}
-	allCoins = set(balance.keys())
-	print allCoins
-	for coin in allCoins:
-		allocation[coin] = 1.0 / len(allCoins)
-	return allocation
+
+	try:
+		cat = config.CUSTOM_ALLOCATION_TIERS
+		# sortedCoins = sorted(coinDetails.items(), key = lambda x: int(x[1]['rank']))
+		for c in coinDetails:
+			r = int(coinDetails[c]['rank'])
+			for i, t in enumerate(cat):
+				if r <= t[0]:
+					allocation[c] = float(t[1]) / (t[0] if i == 0 else t[0] - cat[i-1][0])
+					break
+	except Exception:
+		pass
+
+	try:
+		cas = config.CUSTOM_ALLOCATION_SPECIFIC
+		for l in cas:
+			for c in l[0]:
+				allocation[c] = l[1] / len(l[0])
+	except Exception:
+		pass
+
+	try:
+		ca = config.CUSTOM_ALLOCATION
+		for c in coinDetails:
+			r = int(coinDetails[c]['rank'])
+			if 'major' in ca and r <= ca['major'][0]:
+				allocation[c] = float(ca['major'][1]) / ca['major'][0]
+			elif 'minor' in ca and 'major' in ca and r <= ca['minor'][0] and r > ca['major'][0]:
+				allocation[c] = float(ca['minor'][1]) / (ca['minor'][0] - ca['major'][0])
+			elif 'specific' in ca and c in ca['specific'][0]:
+				allocation[c] = float(ca['specific'][1]) / len(ca['specific'][0])
+	except Exception:
+		pass
+
+	if len(allocation) == 0:
+		allCoins = set(balance.keys())
+		print allCoins
+		for coin in allCoins:
+			allocation[coin] = 1.0 / len(allCoins)
+	return normalize(allocation)
 
 def getTargetAmounts(coinValuesUSD, allocation, pv):
 	targets = {}
@@ -212,46 +256,94 @@ def getTargetAmounts(coinValuesUSD, allocation, pv):
 		targets[coin] = targetCoinAmount
 	return targets
 
+def makeOrders(balance, targets):
+	for c in targets:
+		t = targets[c]
+		h = balance.get(c, 0)
+		d = t - h
+		print c, d
+		if c == "BTC":
+			# TODO
+			continue
+		if abs(d) > h * 0.05:
+			if d > 0:
+				placeLimitSell("BTC-" + c, abs(d), 2, 2)
+			else:
+				placeLimitBuy("BTC-" + c, abs(d), 2, 2)
+
+tab = "   "
+
+def logBalance(balance):
+	if balance:
+		log("Balance:")
+		for c in balance:
+			log(tab + c + ": " + str(balance[c]))
+	else:
+		log("##### No balance found")
+
+def logAllocation(allocation, balance, targets):
+	log("Allocations:")
+	sortedAllocation = sorted(allocation.items(), key=lambda x: x[1], reverse=True)
+	log("{}{:<5} | {:<15} | {:<15} | {:<15} | {:<15}".format(
+		tab,
+		"coin",
+		"alloc",
+		"have",
+		"target",
+		"diff"))
+	for c in sortedAllocation:
+		log("{}{:>5} | {:>15.8f} | {:>15.8f} | {:>15.8f} | {:> 15.8f}".format(
+			tab,
+			c[0],
+			c[1],
+			balance.get(c[0], 0),
+			targets[c[0]],
+			targets[c[0]] - balance.get(c[0], 0)))
+		# log(tab + c[0] + ": " + str(c[1]))
+
+
+def logPortfolio(pv):
+	if pv:
+		log("Supposed PV:")
+		log(tab + str(pv))
+	else:
+		log("##### No pv")
+
 if __name__ == "__main__":
 	# TODO: check if coinbase has btc, if so, transfer
 
 	balance = getBalance()
-	if balance:
-		for coin in balance:
-			print coin, balance[coin]
+	logBalance(balance)
 
-	print ""
-
-	coinValuesUSD = getCoinValuesUSD()
-
-	allocation = getAllocation(coinValuesUSD, balance)
-	print allocation
-	print ""
-
-	# get base amount
 	pv = getPortfolioValue()
-	print pv
-	print ""
+	logPortfolio(pv)
 
+	coinValuesUSD, allDetails = getCoinValuesUSD()
+
+	allocation = getAllocation(allDetails, balance)
 	targets = getTargetAmounts(coinValuesUSD, allocation, pv)
-	for c in targets:
-		print "%s: target %f, have %f" % (
-			c,
-			targets[c],
-			balance.get(c, 0))
+	logAllocation(allocation, balance, targets)
 
-	print ""
-	values = {}
-	for coin in balance:
-		coinAmount = balance[coin]
-		coinValue = coinValuesUSD[coin] * coinAmount
-		values[coin] = coinValue
-	for c in values:
-		print "%f %s at %f per = %f total" % (
-			balance.get(c, 0),
-			c,
-			coinValuesUSD[c],
-			values[c])
+	makeOrders(balance, targets)
+
+	# for c in targets:
+	# 	print "%s: target %f, have %f" % (
+	# 		c,
+	# 		targets[c],
+	# 		balance.get(c, 0))
+
+	# print ""
+	# values = {}
+	# for coin in balance:
+	# 	coinAmount = balance[coin]
+	# 	coinValue = coinValuesUSD[coin] * coinAmount
+	# 	values[coin] = coinValue
+	# for c in values:
+	# 	print "%f %s at %f per = %f total" % (
+	# 		balance.get(c, 0),
+	# 		c,
+	# 		coinValuesUSD[c],
+	# 		values[c])
 
 
 	# return values
