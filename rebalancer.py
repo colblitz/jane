@@ -36,7 +36,7 @@ def log(s):
 
 INIT_SCRIPT = """
 DROP TABLE IF EXISTS transfer_log;
-DROP TABLE IF EXISTS trading_log;
+DROP TABLE IF EXISTS trade_log;
 CREATE TABLE transfer_log (
 	id INTEGER PRIMARY KEY,
 	timestamp INTEGER,
@@ -139,15 +139,41 @@ client = Client(
 #   "updated_at": "2017-09-18T16:27:35Z"
 # }
 
+BTC_WALLET_NAME = "BTC Wallet"
+USD_WALLET_NAME = "USD Wallet"
+
 class CoinbaseAccount:
-	def __init__(self, client, response):
-		# TODO
-		self.balance = response["balance"]["amount"]
-		self.id = response["id"]
+	def __init__(self, client):
 		self.client = client
+		self.accounts = client.get_accounts()
+		self.paymentMethods = client.get_payment_methods()
+
+		for account in self.accounts['data']:
+			if account['name'] == BTC_WALLET_NAME:
+				self.accountBTC = account
+				self.accountIdBTC = account['id']
+			if account['name'] == USD_WALLET_NAME:
+				self.accountUSD = account
+				self.accountIdUSD = account['id']
+
+		for pm in self.paymentMethods['data']:
+			if pm['name'] == USD_WALLET_NAME:
+				self.paymentMethodUSD = pm
+				self.paymentMethodIdUSD = pm['id']
+
+	def getBTCBalanceInUSD(self):
+		return self.accountBTC["native_balance"]["amount"]
+
+	def sellBTC(self, amount):
+		# TODO
+		self.client.sell(
+			self.id,
+			total = str(amount),
+			currency = 'BTC',
+			payment_method = self.paymentMethodIdUSD)
 
 	def sendBTC(self, address, amount):
-		if amount > self.balance:
+		if amount > self.accountBTC["balance"]["amount"]:
 			return
 		return self.client.send_money(
 			self.id,
@@ -156,8 +182,14 @@ class CoinbaseAccount:
 			currency = 'BTC',
 			idem = uuid.uuid1())
 
+	def buyBTC(self):
+		pass
+
+	def withdrawUSD(self):
+		pass
+
 def getAccount():
-	return CoinbaseAccount(client, client.get_primary_account())
+	return CoinbaseAccount(client)
 
 ###########################
 ####  BITTREX METHODS  ####
@@ -218,26 +250,39 @@ def getOpenOrders():
 		[])
 
 def placeOrder(ttype, url, market, quantity, rate, timeout):
-	# r = makeBittrexRequest(
-	# 	url,
-	# 	"market={}&quantity={:.8f}&rate={:.8f}",
-	# 	[market, quantity, rate])
-	# uuid = r['uuid']
-	# log("Created order with uuid: " + uuid)
+	r = makeBittrexRequest(
+		url,
+		"market={}&quantity={:.8f}&rate={:.8f}",
+		[market, quantity, rate])
+	uuid = r['uuid']
+	log("Created order with uuid: " + uuid)
 	time.sleep(timeout)
-	# orderDetails = getOrderDetails(uuid)
-	# if orderDetails['IsOpen']:
-	# 	cancelOrder(uuid)
-	# 	return False
-	# else:
-	# 	insertTrade(market, ttype, quantity, rate, orderDetails['CommissionPaid'])
-	# 	return True
+	orderDetails = getOrderDetails(uuid)
+	if orderDetails['IsOpen']:
+		cancelOrder(uuid)
+		time.sleep(5)
+		return False
+	else:
+		insertTrade(market, ttype, quantity, rate, orderDetails['CommissionPaid'])
+		return True
 
 def placeLimitSell(market, quantity, rate, timeout):
 	return placeOrder("LIMIT SELL", "https://bittrex.com/api/v1.1/market/selllimit", market, quantity, rate, timeout)
 
 def placeLimitBuy(market, quantity, rate, timeout):
 	return placeOrder("LIMIT BUY", "https://bittrex.com/api/v1.1/market/buylimit", market, quantity, rate, timeout)
+
+def getDepositAddress(currency):
+	return makeBittrexRequest(
+		"https://bittrex.com/api/v1.1/account/getdepositaddress",
+		"currency={}",
+		[currency])["Address"]
+
+def withdraw(currency, amount, address):
+	return makeBittrexRequest(
+		"https://bittrex.com/api/v1.1/account/withdraw",
+		"currency={}&quantity={}&address={}",
+		[currency, amount, address])["uuid"]
 
 ########################
 ####  OTHER THINGS  ####
@@ -308,7 +353,7 @@ def getTargetAmounts(coinValuesUSD, allocation, pv):
 	targets = {}
 	for coin in allocation:
 		coinPriceUSD = coinValuesUSD[coin]
-		targetValueUSD = Decimal(allocation[coin] * pv)
+		targetValueUSD = Decimal(allocation[coin]) * pv
 		targetCoinAmount = targetValueUSD / coinPriceUSD
 		targets[coin] = targetCoinAmount
 	return targets
@@ -322,29 +367,39 @@ def tryToMakeOrder(coin, amount):
 
 		tryRate = ask if amount > 0 else bid
 		i = 0
+		success = False
 		while i < config.ORDER_RETRIES:
+			log("# Try {} to order {} for coin at {}".format(i, coin, tryRate))
 			# TODO - re-look up market?
-			if amount > 0 and placeLimitSell("BTC-" + coin, amount, tryRate, 60):
+			if amount < 0 and placeLimitSell("BTC-" + coin, abs(amount), tryRate, config.ORDER_TIMEOUT):
+				success = True
 				break
-			elif amount < 0 and placeLimitBuy("BTC-" + coin, amount, tryRate, 60):
+			elif amount > 0 and placeLimitBuy("BTC-" + coin, amount, tryRate, config.ORDER_TIMEOUT):
+				success = True
 				break
-			tryRate -= (step if amount > 0 else (-1 * step))
+			tryRate -= (step if amount < 0 else (-1 * step))
 			i += 1
+		log("Order successful: {}".format(success))
 	else:
-		# TODO
-		pass
+		log("No market for {}".format(coin))
 
-def makeOrders(balance, targets):
+def makeOrders(coinValuesUSD, balance, targets):
 	for c in targets:
+		log("-----")
 		t = Decimal(targets[c])
 		h = Decimal(balance.get(c, 0))
 		d = Decimal(t - h)
-		print c, d
-		if c == "BTC":
+		v = abs(d) * coinValuesUSD[c]
+		if c == "BTC" or c == "BCH":
 			# TODO
+			log("Skipping BTC/BCH for now")
 			continue
-		if abs(d) > h * Decimal(0.05):
-			tryToMakeOrder(d)
+		else:
+			if v > config.REBALANCE_THRESHOLD_VALUE and abs(d) > h * Decimal(config.REBALANCE_THRESHOLD_RATIO):
+				log("Try to make order for {} of {}".format(c, d))
+				tryToMakeOrder(c, d)
+			else:
+				log("Too small of an order for {}, skipping ({} | {})".format(c, v, (abs(d) / h) if h > 0 else 0))
 
 tab = "   "
 
@@ -387,6 +442,11 @@ if __name__ == "__main__":
 
 	# TODO: check if coinbase has btc, if so, transfer in
 	coinbase = getAccount()
+	# print coinbase.client.get_accounts()
+	# print coinbase.client.get_payment_methods()
+	# print coinbase.walletIdUSD
+
+	print getDepositAddress("BTC")
 
 	balance = getBalance()
 	logBalance(balance)
@@ -395,18 +455,20 @@ if __name__ == "__main__":
 	for c in balance:
 		actualValue += balance[c] * coinValuesUSD[c]
 
-	supposedValue = getPortfolioValue()
-	logPortfolio(actualValue, supposedValue)
-
+	supposedValue = Decimal(getPortfolioValue())
 	moveAmount = 0
 	if actualValue - supposedValue > config.TRANSFER_THRESHOLD:
 		profit = actualValue - supposedValue
+		log("Profit: {}".format(profit))
 		moveAmount = profit * (1 - config.PROFIT_RATIO_TO_KEEP)
 		keepAmount = profit * config.PROFIT_RATIO_TO_KEEP
+		supposedValue += keepAmount
 		insertProfitValue(keepAmount, keepAmount / coinValuesUSD['BTC'])
 	elif actualValue - supposedValue < -1 * config.TRANSFER_THRESHOLD:
 		# TODO: buy more or do nothing
 		pass
+
+	logPortfolio(actualValue, supposedValue)
 
 	# insertManualValue(4000, 4000 / coinValuesUSD['BTC'])
 
@@ -414,7 +476,7 @@ if __name__ == "__main__":
 	targets = getTargetAmounts(coinValuesUSD, allocation, supposedValue)
 	logAllocation(allocation, balance, targets)
 
-	# makeOrders(balance, targets)
+	makeOrders(coinValuesUSD, balance, targets)
 
 	# TODO: send profits out
 	if moveAmount > 0:
