@@ -161,8 +161,13 @@ class CoinbaseAccount:
 				self.paymentMethodUSD = pm
 				self.paymentMethodIdUSD = pm['id']
 
+		self.addressesBTC = client.get_addresses(self.accountIdBTC)
+		self.addressBTC = self.addressesBTC['data'][0]['address']
+
 	def getBTCBalanceInUSD(self):
-		return self.accountBTC["native_balance"]["amount"]
+		return float(self.accountBTC["native_balance"]["amount"])
+	def getBTCBalance(self):
+		return float(self.accountBTC["balance"]["amount"])
 
 	def sellBTC(self, amount):
 		# TODO
@@ -172,15 +177,34 @@ class CoinbaseAccount:
 			currency = 'BTC',
 			payment_method = self.paymentMethodIdUSD)
 
+	def getBTCTransactionStatus(self, tid):
+		details = self.client.get_transaction(self.accountIdBTC, tid)
+		print details
+		return details['status']
+
+	def getBTCTransactionFee(self, tid):
+		pass
+
 	def sendBTC(self, address, amount):
-		if amount > self.accountBTC["balance"]["amount"]:
+		if amount > self.getBTCBalance():
+			log("Not enough in balance - requested {}, have {}".format(amount, self.getBTCBalance()))
 			return
-		return self.client.send_money(
-			self.id,
+
+		log("trying to send {} btc to {}".format(amount, address))
+		transactionData = self.client.send_money(
+			self.accountIdBTC,
 			to = address,
 			amount = str(amount),
 			currency = 'BTC',
-			idem = uuid.uuid1())
+			idem = uuid.uuid1().hex)
+		# print transactionData
+		tid = transactionData['id']
+		log("Created transaction {} for sending {} BTC to {}".format(tid, amount, address))
+		while self.getBTCTransactionStatus(tid).lower() != "completed":
+			log("Transaction not finished, sleeping 60 seconds".format(tid))
+			time.sleep(60)
+		# TODO: insertTransfer("coinbase", amount * coinValuesUSD['BTC'], amount, )
+		log("Transaction completed")
 
 	def buyBTC(self):
 		pass
@@ -278,11 +302,36 @@ def getDepositAddress(currency):
 		"currency={}",
 		[currency])["Address"]
 
-def withdraw(currency, amount, address):
+def getWithdrawalHistory(currency):
+	return makeBittrexRequest(
+		"https://bittrex.com/api/v1.1/account/getwithdrawalhistory",
+		"currency={}",
+		[currency])
+
+def makeWithdrawal(currency, amount, address):
 	return makeBittrexRequest(
 		"https://bittrex.com/api/v1.1/account/withdraw",
 		"currency={}&quantity={}&address={}",
-		[currency, amount, address])["uuid"]
+		[currency, amount, address])
+
+def withdraw(currency, amount, address):
+	r = makeWithdrawal(currency, amount, address)
+	uuid = r['uuid']
+	log("Created withdrawal with uuid: " + uuid)
+	transactionDone = False
+	while not transactionDone:
+		time.sleep(60)
+		history = getWithdrawalHistory(currency)
+		for h in history:
+			if uuid == h['PaymentUuid'] and h['PendingPayment'] == "false":
+				# TODO: log to db
+				# insertTransfer('Coinbase', )
+				# h['TxCost']
+# def insertTransfer(type, amt_usd, amt_btc, fee_usd, fee_btc):
+				transactionDone = True
+				break
+	log("Withdrawal finished")
+
 
 ########################
 ####  OTHER THINGS  ####
@@ -440,13 +489,21 @@ def logPortfolio(av, sv):
 if __name__ == "__main__":
 	coinValuesUSD, allDetails = getCoinValuesUSD()
 
-	# TODO: check if coinbase has btc, if so, transfer in
 	coinbase = getAccount()
-	# print coinbase.client.get_accounts()
-	# print coinbase.client.get_payment_methods()
-	# print coinbase.walletIdUSD
 
-	print getDepositAddress("BTC")
+	# print "blah"
+	# print makeWithdrawal("BTC", 0.005, coinbase.addressBTC)
+	# print getWithdrawalHistory("BTC")
+
+	# if True:
+	# 	sys.exit(1)
+
+	btcTransferThreshold = config.TRANSFER_THRESHOLD / coinValuesUSD['BTC']
+	if coinbase.getBTCBalance() > btcTransferThreshold:
+		bittrexBTCAddress = getDepositAddress("BTC")
+		amount = coinbase.getBTCBalance() * 0.98
+		# coinbase.sendBTC(bittrexBTCAddress, amount)
+
 
 	balance = getBalance()
 	logBalance(balance)
@@ -460,10 +517,10 @@ if __name__ == "__main__":
 	if actualValue - supposedValue > config.TRANSFER_THRESHOLD:
 		profit = actualValue - supposedValue
 		log("Profit: {}".format(profit))
-		moveAmount = profit * (1 - config.PROFIT_RATIO_TO_KEEP)
-		keepAmount = profit * config.PROFIT_RATIO_TO_KEEP
+		moveAmount = profit * Decimal(1 - config.PROFIT_RATIO_TO_KEEP)
+		keepAmount = profit * Decimal(config.PROFIT_RATIO_TO_KEEP)
 		supposedValue += keepAmount
-		insertProfitValue(keepAmount, keepAmount / coinValuesUSD['BTC'])
+		# insertProfitValue(keepAmount, keepAmount / coinValuesUSD['BTC'])
 	elif actualValue - supposedValue < -1 * config.TRANSFER_THRESHOLD:
 		# TODO: buy more or do nothing
 		pass
@@ -476,10 +533,15 @@ if __name__ == "__main__":
 	targets = getTargetAmounts(coinValuesUSD, allocation, supposedValue)
 	logAllocation(allocation, balance, targets)
 
-	makeOrders(coinValuesUSD, balance, targets)
+	# makeOrders(coinValuesUSD, balance, targets)
+
+
+
+	# coinbase.addressBTC
 
 	# TODO: send profits out
 	if moveAmount > 0:
+		# withdraw("BTC", moveAmount * 0.99, coinbase.addressBTC)
 		# transfer to coinbase
 		# transfer to bank
 		pass
