@@ -323,7 +323,7 @@ def withdraw(currency, amount, address):
 		time.sleep(60)
 		history = getWithdrawalHistory(currency)
 		for h in history:
-			if uuid == h['PaymentUuid'] and h['PendingPayment'] == "false":
+			if uuid == h['PaymentUuid'] and not h['PendingPayment']:
 				# TODO: log to db
 				# insertTransfer('Coinbase', )
 				# h['TxCost']
@@ -495,13 +495,22 @@ if __name__ == "__main__":
 	# print makeWithdrawal("BTC", 0.005, coinbase.addressBTC)
 	# print getWithdrawalHistory("BTC")
 
+	# print withdraw("BTC", 0.01, coinbase.addressBTC)
+	# history = getWithdrawalHistory("BTC")
+	# uuid = "12ec6f3a-9c19-4022-af3c-585719a5cab3"
+	# for h in history:
+	# 	if uuid == h['PaymentUuid'] and not h['PendingPayment']:
+	# 		print "asdf"
+
 	# if True:
 	# 	sys.exit(1)
+
 
 	btcTransferThreshold = config.TRANSFER_THRESHOLD / coinValuesUSD['BTC']
 	if coinbase.getBTCBalance() > btcTransferThreshold:
 		bittrexBTCAddress = getDepositAddress("BTC")
 		amount = coinbase.getBTCBalance() * 0.98
+		print "amount: ", amount
 		# coinbase.sendBTC(bittrexBTCAddress, amount)
 
 
@@ -517,6 +526,12 @@ if __name__ == "__main__":
 	if actualValue - supposedValue > config.TRANSFER_THRESHOLD:
 		profit = actualValue - supposedValue
 		log("Profit: {}".format(profit))
+		log("Profit: {}".format(profit / coinValuesUSD["BTC"]))
+
+		# withdraw("BTC", (profit / coinValuesUSD["BTC"]) * Decimal(0.99), coinbase.addressBTC)
+		# if True:
+		# 	sys.exit(1)
+
 		moveAmount = profit * Decimal(1 - config.PROFIT_RATIO_TO_KEEP)
 		keepAmount = profit * Decimal(config.PROFIT_RATIO_TO_KEEP)
 		supposedValue += keepAmount
@@ -529,11 +544,13 @@ if __name__ == "__main__":
 
 	# insertManualValue(4000, 4000 / coinValuesUSD['BTC'])
 
+
+
 	allocation = getAllocation(allDetails, balance)
 	targets = getTargetAmounts(coinValuesUSD, allocation, supposedValue)
 	logAllocation(allocation, balance, targets)
 
-	# makeOrders(coinValuesUSD, balance, targets)
+	makeOrders(coinValuesUSD, balance, targets)
 
 
 
@@ -541,7 +558,7 @@ if __name__ == "__main__":
 
 	# TODO: send profits out
 	if moveAmount > 0:
-		# withdraw("BTC", moveAmount * 0.99, coinbase.addressBTC)
+		# withdraw("BTC", (profit / coinValuesUSD["BTC"]) * 0.99, coinbase.addressBTC)
 		# transfer to coinbase
 		# transfer to bank
 		pass
