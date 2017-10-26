@@ -145,6 +145,7 @@ USD_WALLET_NAME = "USD Wallet"
 class CoinbaseAccount:
 	def __init__(self, client):
 		self.client = client
+		log("Getting coinbase accounts, paymentMethods, addresses")
 		self.accounts = client.get_accounts()
 		self.paymentMethods = client.get_payment_methods()
 
@@ -169,17 +170,37 @@ class CoinbaseAccount:
 	def getBTCBalance(self):
 		return float(self.accountBTC["balance"]["amount"])
 
+	def getBTCSellStatus(self, sid):
+		log("Getting sell details {}".format(sid))
+		details = self.client.get_sell(self.accountIdBTC, sid)
+		return details['status']
+
 	def sellBTC(self, amount):
-		# TODO
-		self.client.sell(
-			self.id,
+		if amount > self.getBTCBalance():
+			log("Not enough in balance to sell - requested {}, have {}".format(amount, self.getBTCBalance()))
+			return
+
+		log("Trying to sell {} btc".format(amount))
+		sellData = self.client.sell(
+			self.accountIdBTC,
 			total = str(amount),
 			currency = 'BTC',
 			payment_method = self.paymentMethodIdUSD)
+		log("Sell details: {}".format(sellData))
+
+		sid = sellData['id']
+		while self.getBTCSellStatus(sid).lower() != "completed":
+			log("Sell {} not completed, sleeping 60 seconds".format(sid))
+			time.sleep(60)
+		log("Sell complete")
+
+	def sellAllBTC(self):
+		amount = self.getBTCBalance()
+		self.sellBTC(amount * 0.95)
 
 	def getBTCTransactionStatus(self, tid):
+		log("Getting transaction details: {}".format(tid))
 		details = self.client.get_transaction(self.accountIdBTC, tid)
-		print details
 		return details['status']
 
 	def getBTCTransactionFee(self, tid):
@@ -190,18 +211,18 @@ class CoinbaseAccount:
 			log("Not enough in balance - requested {}, have {}".format(amount, self.getBTCBalance()))
 			return
 
-		log("trying to send {} btc to {}".format(amount, address))
+		log("Trying to send {} btc to {}".format(amount, address))
 		transactionData = self.client.send_money(
 			self.accountIdBTC,
 			to = address,
 			amount = str(amount),
 			currency = 'BTC',
 			idem = uuid.uuid1().hex)
-		# print transactionData
+		log("Transaction details: {}".format(transactionData))
+
 		tid = transactionData['id']
-		log("Created transaction {} for sending {} BTC to {}".format(tid, amount, address))
 		while self.getBTCTransactionStatus(tid).lower() != "completed":
-			log("Transaction not finished, sleeping 60 seconds".format(tid))
+			log("Transaction {} not finished, sleeping 60 seconds".format(tid))
 			time.sleep(60)
 		# TODO: insertTransfer("coinbase", amount * coinValuesUSD['BTC'], amount, )
 		log("Transaction completed")
@@ -338,6 +359,7 @@ def withdraw(currency, amount, address):
 ########################
 
 def getCoinValuesUSD():
+	log("GET: " + (TICKER_URL % TICKER_LIMIT))
 	response = requests.get(TICKER_URL % TICKER_LIMIT)
 	values = {}
 	allDetails = {}
@@ -357,6 +379,9 @@ def normalize(m):
 def getAllocation(coinDetails, balance):
 	# equal distribution of top 20
 	allocation = {}
+
+	for coin in balance.keys():
+		allocation[coin] = 0
 
 	try:
 		cat = config.CUSTOM_ALLOCATION_TIERS
@@ -486,34 +511,25 @@ def logPortfolio(av, sv):
 	log(tab + "Supposed: " + str(sv))
 	log(tab + "  Actual: " + str(av))
 
+def valueLogFormat(v, p):
+	return "{:.2f} USD, {:.8f} BTC".format(v, v / p)
+
 if __name__ == "__main__":
+	log("Starting")
 	coinValuesUSD, allDetails = getCoinValuesUSD()
+	btcToUSD = coinValuesUSD['BTC']
 
+	# Check if there's anything to transfer in
 	coinbase = getAccount()
-
-	# print "blah"
-	# print makeWithdrawal("BTC", 0.005, coinbase.addressBTC)
-	# print getWithdrawalHistory("BTC")
-
-	# print withdraw("BTC", 0.01, coinbase.addressBTC)
-	# history = getWithdrawalHistory("BTC")
-	# uuid = "12ec6f3a-9c19-4022-af3c-585719a5cab3"
-	# for h in history:
-	# 	if uuid == h['PaymentUuid'] and not h['PendingPayment']:
-	# 		print "asdf"
-
-	# if True:
-	# 	sys.exit(1)
-
-
-	btcTransferThreshold = config.TRANSFER_THRESHOLD / coinValuesUSD['BTC']
+	btcTransferThreshold = config.TRANSFER_THRESHOLD / btcToUSD
 	if coinbase.getBTCBalance() > btcTransferThreshold:
 		bittrexBTCAddress = getDepositAddress("BTC")
 		amount = coinbase.getBTCBalance() * 0.98
-		print "amount: ", amount
-		# coinbase.sendBTC(bittrexBTCAddress, amount)
+		coinbase.sendBTC(bittrexBTCAddress, amount)
+	else:
+		log("Nothing to transfer from coinbase ({:.8f})".format(coinbase.getBTCBalance()))
 
-
+	# Get balance
 	balance = getBalance()
 	logBalance(balance)
 
@@ -523,45 +539,39 @@ if __name__ == "__main__":
 
 	supposedValue = Decimal(getPortfolioValue())
 	moveAmount = 0
-	if actualValue - supposedValue > config.TRANSFER_THRESHOLD:
-		profit = actualValue - supposedValue
-		log("Profit: {}".format(profit))
-		log("Profit: {}".format(profit / coinValuesUSD["BTC"]))
+	profit = actualValue - supposedValue
+	if profit > 0:
+		log("Portfolio is over expected by {}".format(valueLogFormat(profit, btcToUSD)))
 
-		# withdraw("BTC", (profit / coinValuesUSD["BTC"]) * Decimal(0.99), coinbase.addressBTC)
-		# if True:
-		# 	sys.exit(1)
-
-		moveAmount = profit * Decimal(1 - config.PROFIT_RATIO_TO_KEEP)
-		keepAmount = profit * Decimal(config.PROFIT_RATIO_TO_KEEP)
-		supposedValue += keepAmount
-		# insertProfitValue(keepAmount, keepAmount / coinValuesUSD['BTC'])
-	elif actualValue - supposedValue < -1 * config.TRANSFER_THRESHOLD:
-		# TODO: buy more or do nothing
-		pass
+		if profit > config.TRANSFER_THRESHOLD:
+			moveAmount = profit * Decimal(1 - config.PROFIT_RATIO_TO_KEEP)
+			keepAmount = profit * Decimal(config.PROFIT_RATIO_TO_KEEP)
+			supposedValue += keepAmount
+			log("Logging profit of {}".format(valueLogFormat(keepAmount, btcToUSD)))
+			insertProfitValue(keepAmount, keepAmount / btcToUSD)
+	else:
+		log("Portfolio is under expected by {}".format(valueLogFormat(profit, btcToUSD)))
 
 	logPortfolio(actualValue, supposedValue)
 
-	# insertManualValue(4000, 4000 / coinValuesUSD['BTC'])
-
-
-
+	# Get allocation
 	allocation = getAllocation(allDetails, balance)
 	targets = getTargetAmounts(coinValuesUSD, allocation, supposedValue)
 	logAllocation(allocation, balance, targets)
 
+	# Make orders
 	makeOrders(coinValuesUSD, balance, targets)
-
-
-
-	# coinbase.addressBTC
 
 	# TODO: send profits out
 	if moveAmount > 0:
-		# withdraw("BTC", (profit / coinValuesUSD["BTC"]) * 0.99, coinbase.addressBTC)
-		# transfer to coinbase
-		# transfer to bank
-		pass
+		log("Moving profits out to coinbase of {}".format(valueLogFormat(moveAmount, btcToUSD)))
+		withdraw("BTC", (profit / coinValuesUSD["BTC"]) * 0.99, coinbase.addressBTC)
+		coinbase.sellAllBTC()
+		# TODO: transfer to bank
+	else:
+		log("Nothing to move to coinbase")
+
+	log("Finished")
 
 	# Check speculation
 
