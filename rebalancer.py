@@ -7,11 +7,11 @@ import threading
 import os
 import uuid
 import sys
+import argparse
 from decimal import *
+from pprint import pprint
 
 from coinbase.wallet.client import Client
-
-from pprint import pprint
 
 import config
 
@@ -514,7 +514,13 @@ def logPortfolio(av, sv):
 def valueLogFormat(v, p):
 	return "{:.2f} USD, {:.8f} BTC".format(v, v / p)
 
+parser=argparse.ArgumentParser()
+parser.add_argument('--persist', help='Make changes')
+
 if __name__ == "__main__":
+	args=parser.parse_args()
+	makeChanges = args.persist
+
 	log("Starting")
 	coinValuesUSD, allDetails = getCoinValuesUSD()
 	btcToUSD = coinValuesUSD['BTC']
@@ -525,7 +531,11 @@ if __name__ == "__main__":
 	if coinbase.getBTCBalance() > btcTransferThreshold:
 		bittrexBTCAddress = getDepositAddress("BTC")
 		amount = coinbase.getBTCBalance() * 0.98
-		coinbase.sendBTC(bittrexBTCAddress, amount)
+		log("Bringing in {}".format(valueLogFormat(Decimal(amount) * btcToUSD, btcToUSD)))
+		if makeChanges:
+			coinbase.sendBTC(bittrexBTCAddress, amount)
+		else:
+			log("[[Skipped]]")
 	else:
 		log("Nothing to transfer from coinbase ({:.8f})".format(coinbase.getBTCBalance()))
 
@@ -542,13 +552,15 @@ if __name__ == "__main__":
 	profit = actualValue - supposedValue
 	if profit > 0:
 		log("Portfolio is over expected by {}".format(valueLogFormat(profit, btcToUSD)))
-
 		if profit > config.TRANSFER_THRESHOLD:
 			moveAmount = profit * Decimal(1 - config.PROFIT_RATIO_TO_KEEP)
 			keepAmount = profit * Decimal(config.PROFIT_RATIO_TO_KEEP)
 			supposedValue += keepAmount
 			log("Logging profit of {}".format(valueLogFormat(keepAmount, btcToUSD)))
-			insertProfitValue(keepAmount, keepAmount / btcToUSD)
+			if makeChanges:
+				insertProfitValue(keepAmount, keepAmount / btcToUSD)
+			else:
+				log("[[Skipped]]")
 	else:
 		log("Portfolio is under expected by {}".format(valueLogFormat(profit, btcToUSD)))
 
@@ -560,13 +572,19 @@ if __name__ == "__main__":
 	logAllocation(allocation, balance, targets)
 
 	# Make orders
-	makeOrders(coinValuesUSD, balance, targets)
+	if makeChanges:
+		makeOrders(coinValuesUSD, balance, targets)
+	else:
+		log("[[Skipped]]")
 
 	# TODO: send profits out
 	if moveAmount > 0:
 		log("Moving profits out to coinbase of {}".format(valueLogFormat(moveAmount, btcToUSD)))
-		withdraw("BTC", (profit / coinValuesUSD["BTC"]) * 0.99, coinbase.addressBTC)
-		coinbase.sellAllBTC()
+		if makeChanges:
+			withdraw("BTC", (profit / coinValuesUSD["BTC"]) * 0.99, coinbase.addressBTC)
+			coinbase.sellAllBTC()
+		else:
+			log("[[Skipped]]")
 		# TODO: transfer to bank
 	else:
 		log("Nothing to move to coinbase")
