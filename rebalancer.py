@@ -8,8 +8,13 @@ import os
 import uuid
 import sys
 import argparse
+import json
+import base64
+import re
+import socket
 from decimal import *
 from pprint import pprint
+from requests.auth import AuthBase
 
 from coinbase.wallet.client import Client
 
@@ -18,9 +23,27 @@ import config
 TICKER_URL = "https://api.coinmarketcap.com/v1/ticker?limit=%d"
 TICKER_LIMIT = 200
 
+
+
 def log(s):
 	if True:
 		print "[%d] %s" % (int(time.time()), s)
+
+def getIP():
+	return socket.gethostbyname(socket.gethostname())
+
+def getLastDepositTime():
+	try:
+		return os.path.getmtime(config.LAST_DEPOSIT_FILE)
+	except:
+		return time.time()
+
+def shouldDeposit():
+	return getIP() == config.ALLOW_DEPOSIT_IP && time.time() - getLastDepositTime() > DEPOSIT_THRESHOLD
+
+def touch(fname, times=None):
+    with open(fname, 'a'):
+        os.utime(fname, times)
 
 #####################
 ####  DB THINGS  ####
@@ -108,6 +131,102 @@ def insertTrade(exchange, ttype, quantity, price, fee):
 		"INSERT INTO trade_log(timestamp, exchange, type, quantity, price, subtotal, fee, total) VALUES (?,?,?,?,?,?,?,?)",
 		(int(time.time()), exchange, ttype, float(quantity), float(price), st, float(fee), st + fee))
 	db.commit()
+
+############################
+######  GDAX METHODS  ######
+############################
+
+
+
+# Create custom authentication for Exchange
+class CoinbaseExchangeAuth(AuthBase):
+    def __init__(self, api_key, secret_key, passphrase):
+        self.api_key = api_key
+        self.secret_key = secret_key
+        self.passphrase = passphrase
+
+    def __call__(self, request):
+        timestamp = str(time.time())
+        message = timestamp + request.method + request.path_url + (request.body or '')
+        hmac_key = base64.b64decode(self.secret_key)
+        signature = hmac.new(hmac_key, message, hashlib.sha256)
+        signature_b64 = signature.digest().encode('base64').rstrip('\n')
+
+        request.headers.update({
+            'CB-ACCESS-SIGN': signature_b64,
+            'CB-ACCESS-TIMESTAMP': timestamp,
+            'CB-ACCESS-KEY': self.api_key,
+            'CB-ACCESS-PASSPHRASE': self.passphrase,
+            'Content-Type': 'application/json'
+        })
+        return request
+
+api_url = 'https://api.gdax.com/'
+auth = CoinbaseExchangeAuth(
+	config.GDAX_API_KEY,
+	config.GDAX_API_SECRET,
+	config.GDAX_API_PASSPHRASE)
+
+def makeGDAXGetRequest(endpoint):
+	url = api_url + endpoint
+	log("GET: " + url)
+	return requests.get(url, auth=auth).json()
+
+def stripTrailingZeroes(s):
+	return s.rstrip('0')
+
+def getGDAXBalance():
+	j = makeGDAXGetRequest('accounts')
+	balance = {}
+	balanceUSD = 0
+	for details in j:
+		if float(details["balance"]) > 0 and details["currency"] != 'USD':
+			balance[details["currency"]] = Decimal(stripTrailingZeroes(details["balance"]))
+		if details["currency"] == 'USD':
+			balanceUSD = Decimal(stripTrailingZeroes(details["balance"]))
+	return balance, balanceUSD
+
+# def getGDAXUSDBalance():
+# 	j = makeGDAXGetRequest('accounts')
+# 	for details in j:
+# 		if details["currency"] == 'USD':
+# 			return Decimal(stripTrailingZeroes(details["balance"]))
+# 	return 0
+
+def getGDAXUSDAccountId():
+	pass
+
+print makeGDAXGetRequest('accounts/5e6d08bd-0f31-4e41-a60f-498399a59cd5/ledger')
+print makeGDAXGetRequest('accounts/c8e6dfbc-0a58-4c6c-9601-b36569f25369/ledger')
+
+# GET /accounts/<account-id>/ledger
+
+def getGDAXBankAccountId():
+	j = makeGDAXGetRequest('payment-methods')
+	for account in j:
+		if account["type"] == "ach_bank_account":
+			return account["id"]
+
+
+# r = requests.get(api_url + 'payment-methods', auth=auth)
+# pprint(r.json())
+
+# Get accounts
+# r = requests.get(api_url + 'accounts', auth=auth)
+# print pprint(r.json())
+# [{"id": "a1b2c3d4", "balance":...
+
+# Place an order
+# order = {
+#     'size': 1.0,
+#     'price': 1.0,
+#     'side': 'buy',
+#     'product_id': 'BTC-USD',
+# }
+# r = requests.post(api_url + 'orders', json=order, auth=auth)
+# print r.json()
+# {"id": "0428b97b-bec1-429e-a94c-59992926778d"}
+
 
 ############################
 ####  COINBASE METHODS  ####
@@ -270,7 +389,7 @@ def getOrderDetails(uuid):
 		"uuid={}",
 		[uuid])
 
-def getBalance():
+def getBittrexBalance():
 	r = makeBittrexRequest(
 		"https://bittrex.com/api/v1.1/account/getbalances",
 		"",
@@ -485,26 +604,66 @@ def logBalance(balance):
 	else:
 		log("##### No balance found")
 
-def logAllocation(allocation, balance, targets):
-	log("Allocations:")
+def logBalances(coinValuesUSD, totalBalance, balances):
+	log("")
+	totalUSD = sum(map(lambda c : totalBalance[c] * coinValuesUSD[c], totalBalance.keys()))
+	# log("TOTAL BALANCE: {:>9.2f}".format(totalUSD))
+	coins = sorted(totalBalance.keys(), key=lambda c: totalBalance[c] * coinValuesUSD[c], reverse=True)
+	headers = "{}{:<5} | {:<8} ".format(tab, "Coin", "$/c")
+	for b in balances:
+		headers += "|| {:<13} | {:<5} ($) ".format(b, b)
+	headers += "|| {:<13} | {:<5} ($) | (%) ".format("Total", "Total")
+	log(headers)
+	log(re.sub('[^|]', '-', headers))
+	for c in coins:
+		coinValueUSD = coinValuesUSD[c]
+		row = "{}{:>5} | {:>8.2f} ".format(tab, c, coinValueUSD)
+		for b in balances:
+			if c in balances[b]:
+				row += "|| {:>13.8f} | {:>9.2f} ".format(balances[b][c], balances[b][c] * coinValueUSD)
+			else:
+				row += "|| {:>13} | {:>9} ".format("", "")
+		v = totalBalance[c] * coinValueUSD
+		row += "|| {:>13.8f} | {:>9.2f} | {:>4.1f}".format(totalBalance[c], v, v * 100 / totalUSD)
+		log(row)
+	log("")
+
+def logAllocation(coinValuesUSD, allocation, balance, targets):
+	log("")
 	sortedAllocation = sorted(allocation.items(), key=lambda x: x[1], reverse=True)
-	log("{}{:<5} | {:<15} | {:<15} | {:<15} | {:<15}".format(
+	headers = "{}{:<5} | {:<4} | {:<13} | {:<13} | {:<13} | {:<9} | {:<9} | {:<9}".format(
 		tab,
-		"coin",
-		"alloc",
-		"have",
-		"target",
-		"diff"))
+		"Coin",
+		"(%)",
+		"Have (#)",
+		"Target (#)",
+		"Diff",
+		"Have ($)",
+		"Target ($)",
+		"Diff")
+	log(headers)
+	log(re.sub('[^|]', '-', headers))
 	for c in sortedAllocation:
-		log("{}{:>5} | {:>15.8f} | {:>15.8f} | {:>15.8f} | {:> 15.8f}".format(
+		cv = coinValuesUSD[c[0]]
+		diff = balance.get(c[0], 0) - targets[c[0]]
+		log("{}{:>5} | {:>4.1f} | {:>13.8f} | {:>13.8f} | {:>13.8f} | {:>9.2f} | {:>10.2f} | {:>9.2f}".format(
 			tab,
 			c[0],
-			c[1],
+			c[1] * 100,
 			balance.get(c[0], 0),
 			targets[c[0]],
-			targets[c[0]] - balance.get(c[0], 0)))
+			diff,
+			balance.get(c[0], 0) * cv,
+			targets[c[0]] * cv,
+			diff * cv))
 		# log(tab + c[0] + ": " + str(c[1]))
 
+
+def getBalanceTotal(coinValuesUSD, balance):
+	total = 0
+	for c in balance:
+		total += balance[c] * coinValuesUSD[c]
+	return total
 
 def logPortfolio(av, sv):
 	log("Portfolio Value:")
@@ -517,59 +676,110 @@ def valueLogFormat(v, p):
 parser=argparse.ArgumentParser()
 parser.add_argument('--persist', help='Make changes')
 
+
+
+def combineBalances(balanceList):
+	balance = {}
+	for b in balanceList:
+		for c in b:
+			if c in balance:
+				balance[c] += b[c]
+			else:
+				balance[c] = b[c]
+	return balance
+
 if __name__ == "__main__":
+	log("Starting")
 	args=parser.parse_args()
 	makeChanges = args.persist
 
-	log("Starting")
+	# if True:
+	# 	sys.exit(1)
+
+	# Get values of coins
 	coinValuesUSD, allDetails = getCoinValuesUSD()
 	btcToUSD = coinValuesUSD['BTC']
 
+	# Get balances
+	gdaxBalance, gdaxUSD = getGDAXBalance()
+	btrxBalance = getBittrexBalance()
+	balance = combineBalances([gdaxBalance, btrxBalance])
+	logBalances(coinValuesUSD, balance, {"GDAX": gdaxBalance, "BTRX": btrxBalance})
+
+	balanceUSD = getBalanceTotal(coinValuesUSD, balance)
+	totalUSD = balanceUSD + gdaxUSD
+
+	if shouldDeposit():
+		touch(LAST_DEPOSIT_FILE)
+
+	log("TOTAL BALANCE: {:>9.2f}".format(balanceUSD))
+	log("  NEW BALANCE: {:>9.2f}".format(totalUSD))
+
+	allocation = getAllocation(allDetails, balance)
+	targets = getTargetAmounts(coinValuesUSD, allocation, totalUSD)
+	logAllocation(coinValuesUSD, allocation, balance, targets)
+
+	if True:
+		sys.exit(1)
+
+
+
+
+	# 1. Transfer from bank to GDAX - every week
+	# 2. Get allocations - BTC/ETH/LTC in GDAX, others in Bittrex
+
+
+	# 3. Transfer BTC to Bittrex if necessary
+	# 4. Buy/sell things
+	# 5. Send email
+
+
+
 	# Check if there's anything to transfer in
-	coinbase = getAccount()
-	btcTransferThreshold = config.TRANSFER_THRESHOLD / btcToUSD
-	if coinbase.getBTCBalance() > btcTransferThreshold:
-		bittrexBTCAddress = getDepositAddress("BTC")
-		amount = coinbase.getBTCBalance() * 0.98
-		log("Bringing in {}".format(valueLogFormat(Decimal(amount) * btcToUSD, btcToUSD)))
-		if makeChanges:
-			coinbase.sendBTC(bittrexBTCAddress, amount)
-		else:
-			log("[[Skipped]]")
-	else:
-		log("Nothing to transfer from coinbase ({:.8f})".format(coinbase.getBTCBalance()))
+	# coinbase = getAccount()
+	# btcTransferThreshold = config.TRANSFER_THRESHOLD / btcToUSD
+	# if coinbase.getBTCBalance() > btcTransferThreshold:
+	# 	bittrexBTCAddress = getDepositAddress("BTC")
+	# 	amount = coinbase.getBTCBalance() * 0.98
+	# 	log("Bringing in {}".format(valueLogFormat(Decimal(amount) * btcToUSD, btcToUSD)))
+	# 	if makeChanges:
+	# 		coinbase.sendBTC(bittrexBTCAddress, amount)
+	# 	else:
+	# 		log("[[Skipped]]")
+	# else:
+	# 	log("Nothing to transfer from coinbase ({:.8f})".format(coinbase.getBTCBalance()))
 
 	# Get balance
-	balance = getBalance()
-	logBalance(balance)
+	# balance = getBittrexBalance()
+	# logBalance(balance)
 
-	actualValue = Decimal(0.0)
-	for c in balance:
-		actualValue += balance[c] * coinValuesUSD[c]
+	# actualValue = Decimal(0.0)
+	# for c in balance:
+	# 	actualValue += balance[c] * coinValuesUSD[c]
 
-	supposedValue = Decimal(getPortfolioValue())
-	moveAmount = 0
-	profit = actualValue - supposedValue
-	if profit > 0:
-		log("Portfolio is over expected by {}".format(valueLogFormat(profit, btcToUSD)))
-		if profit > config.TRANSFER_THRESHOLD:
-			moveAmount = profit * Decimal(1 - config.PROFIT_RATIO_TO_KEEP)
-			keepAmount = profit * Decimal(config.PROFIT_RATIO_TO_KEEP)
-			supposedValue += keepAmount
-			log("Logging profit of {}".format(valueLogFormat(keepAmount, btcToUSD)))
-			if makeChanges:
-				insertProfitValue(keepAmount, keepAmount / btcToUSD)
-			else:
-				log("[[Skipped]]")
-	else:
-		log("Portfolio is under expected by {}".format(valueLogFormat(profit, btcToUSD)))
+	# supposedValue = Decimal(getPortfolioValue())
+	# moveAmount = 0
+	# profit = actualValue - supposedValue
+	# if profit > 0:
+	# 	log("Portfolio is over expected by {}".format(valueLogFormat(profit, btcToUSD)))
+	# 	if profit > config.TRANSFER_THRESHOLD:
+	# 		moveAmount = profit * Decimal(1 - config.PROFIT_RATIO_TO_KEEP)
+	# 		keepAmount = profit * Decimal(config.PROFIT_RATIO_TO_KEEP)
+	# 		supposedValue += keepAmount
+	# 		log("Logging profit of {}".format(valueLogFormat(keepAmount, btcToUSD)))
+	# 		if makeChanges:
+	# 			insertProfitValue(keepAmount, keepAmount / btcToUSD)
+	# 		else:
+	# 			log("[[Skipped]]")
+	# else:
+	# 	log("Portfolio is under expected by {}".format(valueLogFormat(profit, btcToUSD)))
 
-	logPortfolio(actualValue, supposedValue)
+	# logPortfolio(actualValue, supposedValue)
 
 	# Get allocation
-	allocation = getAllocation(allDetails, balance)
-	targets = getTargetAmounts(coinValuesUSD, allocation, supposedValue)
-	logAllocation(allocation, balance, targets)
+	# allocation = getAllocation(allDetails, balance)
+	# targets = getTargetAmounts(coinValuesUSD, allocation, supposedValue)
+	# logAllocation(allocation, balance, targets)
 
 	# Make orders
 	if makeChanges:
