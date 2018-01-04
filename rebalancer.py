@@ -23,11 +23,11 @@ import config
 TICKER_URL = "https://api.coinmarketcap.com/v1/ticker?limit=%d"
 TICKER_LIMIT = 200
 
-
-
+logs = []
 def log(s):
-	if True:
-		print "[%d] %s" % (int(time.time()), s)
+	message = "[%d] %s" % (int(time.time()), s)
+	logs.append(message)
+	print message
 
 def getIP():
 	return socket.gethostbyname(socket.gethostname())
@@ -35,15 +35,25 @@ def getIP():
 def getLastDepositTime():
 	try:
 		return os.path.getmtime(config.LAST_DEPOSIT_FILE)
-	except:
+	except Exception as err:
+		log(err)
 		return time.time()
 
 def shouldDeposit():
-	return getIP() == config.ALLOW_DEPOSIT_IP && time.time() - getLastDepositTime() > DEPOSIT_THRESHOLD
+	# return True
+	# a = getLastDepositTime()
+	# return time.time() - a > 10
+	return getIP() == config.ALLOW_DEPOSIT_IP and time.time() - getLastDepositTime() > DEPOSIT_THRESHOLD
 
 def touch(fname, times=None):
     with open(fname, 'a'):
         os.utime(fname, times)
+
+def isProd():
+	try:
+		return config.IS_PROD
+	except:
+		return False
 
 #####################
 ####  DB THINGS  ####
@@ -136,8 +146,6 @@ def insertTrade(exchange, ttype, quantity, price, fee):
 ######  GDAX METHODS  ######
 ############################
 
-
-
 # Create custom authentication for Exchange
 class CoinbaseExchangeAuth(AuthBase):
     def __init__(self, api_key, secret_key, passphrase):
@@ -172,6 +180,12 @@ def makeGDAXGetRequest(endpoint):
 	log("GET: " + url)
 	return requests.get(url, auth=auth).json()
 
+def makeGDAXPostRequest(endpoint, data):
+	url = api_url + endpoint
+	log("POST: " + url)
+	log("      " + str(data))
+	return requests.post(url, auth=auth, data=json.dumps(data)).json()
+
 def stripTrailingZeroes(s):
 	return s.rstrip('0')
 
@@ -180,11 +194,22 @@ def getGDAXBalance():
 	balance = {}
 	balanceUSD = 0
 	for details in j:
-		if float(details["balance"]) > 0 and details["currency"] != 'USD':
-			balance[details["currency"]] = Decimal(stripTrailingZeroes(details["balance"]))
+		# if float(details["balance"]) > 0 and details["currency"] != 'USD':
+		# 	balance[details["currency"]] = Decimal(stripTrailingZeroes(details["balance"]))
+		balance[details["currency"]] = Decimal(stripTrailingZeroes(details["balance"]))
 		if details["currency"] == 'USD':
 			balanceUSD = Decimal(stripTrailingZeroes(details["balance"]))
 	return balance, balanceUSD
+
+def makeGDAXDeposit(usdAmount, bankId):
+	log("")
+	log("Making deposit")
+	j = makeGDAXPostRequest('deposits/payment-method', {
+		"amount": '%.2f' % usdAmount,
+		"currency": "USD",
+		"payment_method_id": str(bankId)})
+	log("Deposit result: {}".format(str(j)))
+	log("")
 
 # def getGDAXUSDBalance():
 # 	j = makeGDAXGetRequest('accounts')
@@ -193,11 +218,11 @@ def getGDAXBalance():
 # 			return Decimal(stripTrailingZeroes(details["balance"]))
 # 	return 0
 
-def getGDAXUSDAccountId():
-	pass
+# def getGDAXUSDAccountId():
+# 	pass
 
-print makeGDAXGetRequest('accounts/5e6d08bd-0f31-4e41-a60f-498399a59cd5/ledger')
-print makeGDAXGetRequest('accounts/c8e6dfbc-0a58-4c6c-9601-b36569f25369/ledger')
+# print makeGDAXGetRequest('accounts/5e6d08bd-0f31-4e41-a60f-498399a59cd5/ledger')
+# print makeGDAXGetRequest('accounts/c8e6dfbc-0a58-4c6c-9601-b36569f25369/ledger')
 
 # GET /accounts/<account-id>/ledger
 
@@ -206,6 +231,15 @@ def getGDAXBankAccountId():
 	for account in j:
 		if account["type"] == "ach_bank_account":
 			return account["id"]
+
+
+def getGDAXMarket(exchange):
+	j = makeGDAXGetRequest('products/' + exchange + '/ticker')
+	return j
+
+def getGDAXOrderDetails():
+	pass
+
 
 
 # r = requests.get(api_url + 'payment-methods', auth=auth)
@@ -359,7 +393,7 @@ def getAccount():
 ####  BITTREX METHODS  ####
 ###########################
 
-def makeBittrexRequest(endpoint, urlargs, args):
+def makeBTRXGetRequest(endpoint, urlargs, args):
 	nonce = int(time.time());
 	url = ("{}?apikey={}&nonce={}&" + urlargs).format(
 		endpoint,
@@ -377,20 +411,20 @@ def makeBittrexRequest(endpoint, urlargs, args):
 
 # ex: getMarket("BTC-ARK")
 # returns : {u'Ask': 0.00098, u'Bid': 0.00097114, u'Last': 0.00098}
-def getMarket(exchange):
-	return makeBittrexRequest(
+def getBTRXMarket(exchange):
+	return makeBTRXGetRequest(
 		"https://bittrex.com/api/v1.1/public/getticker",
 		"market={}",
 		[exchange])
 
-def getOrderDetails(uuid):
-	return makeBittrexRequest(
+def getBTRXOrderDetails(uuid):
+	return makeBTRXGetRequest(
 		"https://bittrex.com/api/v1.1/account/getorder",
 		"uuid={}",
 		[uuid])
 
-def getBittrexBalance():
-	r = makeBittrexRequest(
+def getBTRXBalance():
+	r = makeBTRXGetRequest(
 		"https://bittrex.com/api/v1.1/account/getbalances",
 		"",
 		[])
@@ -400,56 +434,56 @@ def getBittrexBalance():
 			balances[details["Currency"]] = Decimal(str(details["Balance"]))
 	return balances
 
-def cancelOrder(uuid):
-	return makeBittrexRequest(
+def cancelBTRXOrder(uuid):
+	return makeBTRXGetRequest(
 		"https://bittrex.com/api/v1.1/market/cancel",
 		"uuid={}",
 		[uuid]) != None
 
 # optional market string
-def getOpenOrders():
-	return makeBittrexRequest(
+def getBTRXOpenOrders():
+	return makeBTRXGetRequest(
 		"https://bittrex.com/api/v1.1/market/getopenorders",
 		"",
 		[])
 
-def placeOrder(ttype, url, market, quantity, rate, timeout):
-	r = makeBittrexRequest(
+def placeBTRXOrder(ttype, url, market, quantity, rate, timeout):
+	r = makeBTRXGetRequest(
 		url,
 		"market={}&quantity={:.8f}&rate={:.8f}",
 		[market, quantity, rate])
 	uuid = r['uuid']
 	log("Created order with uuid: " + uuid)
 	time.sleep(timeout)
-	orderDetails = getOrderDetails(uuid)
+	orderDetails = getBTRXOrderDetails(uuid)
 	if orderDetails['IsOpen']:
-		cancelOrder(uuid)
+		cancelBTRXOrder(uuid)
 		time.sleep(5)
 		return False
 	else:
 		insertTrade(market, ttype, quantity, rate, orderDetails['CommissionPaid'])
 		return True
 
-def placeLimitSell(market, quantity, rate, timeout):
-	return placeOrder("LIMIT SELL", "https://bittrex.com/api/v1.1/market/selllimit", market, quantity, rate, timeout)
+def placeBTRXLimitSell(market, quantity, rate, timeout):
+	return placeBTRXOrder("LIMIT SELL", "https://bittrex.com/api/v1.1/market/selllimit", market, quantity, rate, timeout)
 
-def placeLimitBuy(market, quantity, rate, timeout):
-	return placeOrder("LIMIT BUY", "https://bittrex.com/api/v1.1/market/buylimit", market, quantity, rate, timeout)
+def placeBTRXLimitBuy(market, quantity, rate, timeout):
+	return placeBTRXOrder("LIMIT BUY", "https://bittrex.com/api/v1.1/market/buylimit", market, quantity, rate, timeout)
 
 def getDepositAddress(currency):
-	return makeBittrexRequest(
+	return makeBTRXGetRequest(
 		"https://bittrex.com/api/v1.1/account/getdepositaddress",
 		"currency={}",
 		[currency])["Address"]
 
 def getWithdrawalHistory(currency):
-	return makeBittrexRequest(
+	return makeBTRXGetRequest(
 		"https://bittrex.com/api/v1.1/account/getwithdrawalhistory",
 		"currency={}",
 		[currency])
 
 def makeWithdrawal(currency, amount, address):
-	return makeBittrexRequest(
+	return makeBTRXGetRequest(
 		"https://bittrex.com/api/v1.1/account/withdraw",
 		"currency={}&quantity={}&address={}",
 		[currency, amount, address])
@@ -545,54 +579,55 @@ def getAllocation(coinDetails, balance):
 def getTargetAmounts(coinValuesUSD, allocation, pv):
 	targets = {}
 	for coin in allocation:
-		coinPriceUSD = coinValuesUSD[coin]
-		targetValueUSD = Decimal(allocation[coin]) * pv
-		targetCoinAmount = targetValueUSD / coinPriceUSD
-		targets[coin] = targetCoinAmount
+		if allocation[coin] > 0:
+			coinPriceUSD = coinValuesUSD[coin]
+			targetValueUSD = Decimal(allocation[coin]) * pv
+			targetCoinAmount = targetValueUSD / coinPriceUSD
+			targets[coin] = targetCoinAmount
 	return targets
 
-def tryToMakeOrder(coin, amount):
-	marketValues = getMarket("BTC-"+coin)
-	if marketValues:
-		ask = marketValues['Ask']
-		bid = marketValues['Bid']
-		step = (ask - bid) / float(config.ORDER_RETRIES)
+# def tryToMakeOrder(coin, amount):
+# 	marketValues = getMarket("BTC-"+coin)
+# 	if marketValues:
+# 		ask = marketValues['Ask']
+# 		bid = marketValues['Bid']
+# 		step = (ask - bid) / float(config.ORDER_RETRIES)
 
-		tryRate = ask if amount > 0 else bid
-		i = 0
-		success = False
-		while i < config.ORDER_RETRIES:
-			log("# Try {} to order {} for coin at {}".format(i, coin, tryRate))
-			# TODO - re-look up market?
-			if amount < 0 and placeLimitSell("BTC-" + coin, abs(amount), tryRate, config.ORDER_TIMEOUT):
-				success = True
-				break
-			elif amount > 0 and placeLimitBuy("BTC-" + coin, amount, tryRate, config.ORDER_TIMEOUT):
-				success = True
-				break
-			tryRate -= (step if amount < 0 else (-1 * step))
-			i += 1
-		log("Order successful: {}".format(success))
-	else:
-		log("No market for {}".format(coin))
+# 		tryRate = ask if amount > 0 else bid
+# 		i = 0
+# 		success = False
+# 		while i < config.ORDER_RETRIES:
+# 			log("# Try {} to order {} for coin at {}".format(i, coin, tryRate))
+# 			# TODO - re-look up market?
+# 			if amount < 0 and placeLimitSell("BTC-" + coin, abs(amount), tryRate, config.ORDER_TIMEOUT):
+# 				success = True
+# 				break
+# 			elif amount > 0 and placeLimitBuy("BTC-" + coin, amount, tryRate, config.ORDER_TIMEOUT):
+# 				success = True
+# 				break
+# 			tryRate -= (step if amount < 0 else (-1 * step))
+# 			i += 1
+# 		log("Order successful: {}".format(success))
+# 	else:
+# 		log("No market for {}".format(coin))
 
-def makeOrders(coinValuesUSD, balance, targets):
-	for c in targets:
-		log("-----")
-		t = Decimal(targets[c])
-		h = Decimal(balance.get(c, 0))
-		d = Decimal(t - h)
-		v = abs(d) * coinValuesUSD[c]
-		if c == "BTC" or c == "BCH":
-			# TODO
-			log("Skipping BTC/BCH for now")
-			continue
-		else:
-			if v > config.REBALANCE_THRESHOLD_VALUE and abs(d) > h * Decimal(config.REBALANCE_THRESHOLD_RATIO):
-				log("Try to make order for {} of {}".format(c, d))
-				tryToMakeOrder(c, d)
-			else:
-				log("Too small of an order for {}, skipping ({} | {})".format(c, v, (abs(d) / h) if h > 0 else 0))
+# def makeOrders(coinValuesUSD, balance, targets):
+# 	for c in targets:
+# 		log("-----")
+# 		t = Decimal(targets[c])
+# 		h = Decimal(balance.get(c, 0))
+# 		d = Decimal(t - h)
+# 		v = abs(d) * coinValuesUSD[c]
+# 		if c == "BTC" or c == "BCH":
+# 			# TODO
+# 			log("Skipping BTC/BCH for now")
+# 			continue
+# 		else:
+# 			if v > config.REBALANCE_THRESHOLD_VALUE and abs(d) > h * Decimal(config.REBALANCE_THRESHOLD_RATIO):
+# 				log("Try to make order for {} of {}".format(c, d))
+# 				tryToMakeOrder(c, d)
+# 			else:
+# 				log("Too small of an order for {}, skipping ({} | {})".format(c, v, (abs(d) / h) if h > 0 else 0))
 
 tab = "   "
 
@@ -645,17 +680,30 @@ def logAllocation(coinValuesUSD, allocation, balance, targets):
 	log(re.sub('[^|]', '-', headers))
 	for c in sortedAllocation:
 		cv = coinValuesUSD[c[0]]
-		diff = balance.get(c[0], 0) - targets[c[0]]
-		log("{}{:>5} | {:>4.1f} | {:>13.8f} | {:>13.8f} | {:>13.8f} | {:>9.2f} | {:>10.2f} | {:>9.2f}".format(
-			tab,
-			c[0],
-			c[1] * 100,
-			balance.get(c[0], 0),
-			targets[c[0]],
-			diff,
-			balance.get(c[0], 0) * cv,
-			targets[c[0]] * cv,
-			diff * cv))
+		if c[0] in targets:
+			target = targets[c[0]]
+			diff = balance.get(c[0], 0) - target
+			log("{}{:>5} | {:>4.1f} | {:>13.8f} | {:>13.8f} | {:>13.8f} | {:>9.2f} | {:>10.2f} | {:>9.2f}".format(
+				tab,
+				c[0],
+				c[1] * 100,
+				balance.get(c[0], 0),
+				target,
+				diff,
+				balance.get(c[0], 0) * cv,
+				target * cv,
+				diff * cv))
+		else:
+			log("{}{:>5} | {:>4.1f} | {:>13.8f} | {:>13} | {:>13} | {:>9.2f} | {:>10} | {:>9}".format(
+				tab,
+				c[0],
+				c[1] * 100,
+				balance.get(c[0], 0),
+				"",
+				"",
+				balance.get(c[0], 0) * cv,
+				"",
+				""))
 		# log(tab + c[0] + ": " + str(c[1]))
 
 
@@ -688,8 +736,146 @@ def combineBalances(balanceList):
 				balance[c] = b[c]
 	return balance
 
+def sendEmail():
+	pass
+
+def tryToMakeGDAXOrder(c, diff):
+	log("try to make GDAX order for {: 13.8f} {}".format(diff, c))
+
+def tryToMakeBTRXOrder(c, diff):
+	log("try to make BTRX order for {: 13.8f} {}".format(diff, c))
+	marketValues = getBTRXMarket("BTC-"+coin)
+	if marketValues:
+		ask = marketValues['Ask']
+		bid = marketValues['Bid']
+		step = (ask - bid) / float(config.ORDER_RETRIES)
+
+		tryRate = ask if amount > 0 else bid
+		i = 0
+		success = False
+		while i < config.ORDER_RETRIES:
+			log("# Try {} to order {} for coin at {}".format(i, coin, tryRate))
+			# TODO - re-look up market?
+			if amount < 0 and placeLimitSell("BTC-" + coin, abs(amount), tryRate, config.ORDER_TIMEOUT):
+				success = True
+				break
+			elif amount > 0 and placeLimitBuy("BTC-" + coin, amount, tryRate, config.ORDER_TIMEOUT):
+				success = True
+				break
+			tryRate -= (step if amount < 0 else (-1 * step))
+			i += 1
+		log("Order successful: {}".format(success))
+	else:
+		log("No market for {}".format(coin))
+
+def getMarketValues(coin):
+	if config.COIN_EXCHANGES[coin] == 'GDAX':
+		details = getGDAXMarket(coin + "-USD")
+		return (details['ask'], details['bid'])
+	elif config.COIN_EXCHANGES[coin] == 'BTRX':
+		details = getBTRXMarket("BTC-" + coin)
+		return (details['Ask'], details['Bid'])
+	else:
+		return (None, None)
+
+def placeLimitSell(coin, amount, rate, timeout):
+	if config.COIN_EXCHANGES[coin] == 'GDAX':
+		### TODO
+		pass
+	elif config.COIN_EXCHANGES[coin] == 'BTRX':
+		return placeBTRXLimitSell("BTC-" + coin, amount, rate, timeout)
+	else:
+		return False
+
+def placeLimitBuy(coin, amount, rate, timeout):
+	if config.COIN_EXCHANGES[coin] == 'GDAX':
+		### TODO
+		pass
+	elif config.COIN_EXCHANGES[coin] == 'BTRX':
+		return placeBTRXLimitBuy("BTC-" + coin, amount, rate, timeout)
+	else:
+		return False
+
+def tryToMakeOrder(coin, amount):
+	log("try to make order for {: 13.8f} {}".format(diff, coin))
+	(ask, bid) = getMarketValues(coin)
+	if not ask:
+		log("No market found for {}".format(coin))
+		return
+	step = (ask - bid) / float(config.ORDER_RETRIES)
+
+	tryRate = ask if amount > 0 else bid
+	i = 0
+	success = False
+	while i < config.ORDER_RETRIES:
+		log("# Try {} at {}".format(i, tryRate))
+		# TODO - re-look up market?
+		if amount < 0 and placeLimitSell(coin, abs(amount), tryRate, config.ORDER_TIMEOUT):
+			success = True
+			break
+		elif amount > 0 and placeLimitBuy(coin, amount, tryRate, config.ORDER_TIMEOUT):
+			success = True
+			break
+		tryRate -= (step if amount < 0 else (-1 * step))
+		i += 1
+	log("Order successful: {}".format(success))
+
+def makeOrders(coinValuesUSD, balance, targets):
+	orders = []
+	for c in targets:
+		o = checkOrder(c, coinValuesUSD, balance, targets)
+		if o: orders.append(o)
+	orders = sorted(orders, key = lambda o: o[1] * coinValuesUSD[o[0]])
+
+	log("")
+	log("Ordered orders:")
+	for (c, diff) in orders:
+		log("{:>4} {: 13.8f} {:>5} ({})".format(
+			"Sell" if diff < 0 else "Buy",
+			diff if diff > 0 else diff * -1,
+			c,
+			diff * coinValuesUSD[c]))
+	log("")
+
+	for (c, diff) in orders:
+		tryToMakeOrder(c, diff)
+
+# def makeGDAXOrders(coinValuesUSD, balance, targets):
+# 	orders = []
+# 	for c in ['BTC', 'ETH', 'LTC']:
+# 		o = checkOrder("GDAX", c, coinValuesUSD, balance, targets)
+# 		if o: orders.append(o)
+# 	for (c, diff) in [o for o in orders if o[1] < 0]:
+# 		tryToMakeGDAXOrder(c, diff)
+# 	for (c, diff) in [o for o in orders if o[1] > 0]:
+# 		tryToMakeGDAXOrder(c, diff)
+
+# def makeBTRXOrders(coinValuesUSD, balance, targets):
+# 	orders = []
+# 	for c in [c for c in targets if c not in ['USD', 'BTC', 'ETH', 'LTC']]:
+# 		o = checkOrder("BTRX", c, coinValuesUSD, balance, targets)
+# 		if o: orders.append(o)
+# 	for (c, diff) in [o for o in orders if o[1] < 0]:
+# 		tryToMakeBTRXOrder(c, diff)
+# 	for (c, diff) in [o for o in orders if o[1] > 0]:
+# 		tryToMakeBTRXOrder(c, diff)
+
+def checkOrder(c, coinValuesUSD, balance, targets):
+	target = Decimal(targets[c])
+	have = Decimal(balance.get(c, 0))
+	diff = Decimal(target - have)
+	value = abs(diff) * coinValuesUSD[c]
+	bigEnoughValue = value > config.REBALANCE_THRESHOLD_VALUE
+	bigEnoughRatio = abs(diff) > have * Decimal(config.REBALANCE_THRESHOLD_RATIO)
+	if bigEnoughValue or bigEnoughRatio:
+		return [c, diff]
+	else:
+		log("Too small of an order for {} ({} | {}), skipping".format(c, value, (abs(diff) / have) if have > 0 else 0))
+		return None
+
 if __name__ == "__main__":
 	log("Starting")
+	log("")
 	args=parser.parse_args()
 	makeChanges = args.persist
 
@@ -698,19 +884,25 @@ if __name__ == "__main__":
 
 	# Get values of coins
 	coinValuesUSD, allDetails = getCoinValuesUSD()
+	coinValuesUSD['USD'] = Decimal("1.0")
 	btcToUSD = coinValuesUSD['BTC']
+
+	if shouldDeposit():
+		if makeChanges:
+			bankId = getGDAXBankAccountId()
+			makeGDAXDeposit(config.WEEKLY_DEPOSIT_AMOUNT, bankId)
+			touch(config.LAST_DEPOSIT_FILE)
+		else:
+			log("[[Skipped making deposit]]")
 
 	# Get balances
 	gdaxBalance, gdaxUSD = getGDAXBalance()
-	btrxBalance = getBittrexBalance()
+	btrxBalance = getBTRXBalance()
 	balance = combineBalances([gdaxBalance, btrxBalance])
 	logBalances(coinValuesUSD, balance, {"GDAX": gdaxBalance, "BTRX": btrxBalance})
 
 	balanceUSD = getBalanceTotal(coinValuesUSD, balance)
 	totalUSD = balanceUSD + gdaxUSD
-
-	if shouldDeposit():
-		touch(LAST_DEPOSIT_FILE)
 
 	log("TOTAL BALANCE: {:>9.2f}".format(balanceUSD))
 	log("  NEW BALANCE: {:>9.2f}".format(totalUSD))
@@ -719,10 +911,25 @@ if __name__ == "__main__":
 	targets = getTargetAmounts(coinValuesUSD, allocation, totalUSD)
 	logAllocation(coinValuesUSD, allocation, balance, targets)
 
+	makeOrders(coinValuesUSD, balance, targets)
+	# makeGDAXOrders(coinValuesUSD, balance, targets)
+	# makeBTRXOrders(coinValuesUSD, balance, targets)
+
 	if True:
 		sys.exit(1)
 
+	if makeChanges:
+		makeGDAXOrders(coinValuesUSD, balance, targets)
+		makeBTRXOrders(coinValuesUSD, balance, targets)
+	else:
+		log("[[Skipped making orders]]")
 
+	log("")
+	log("Finished")
+
+	sendEmail()
+
+	# GDAX - buy BTC, then do ETH/BTC, LTC/BTC
 
 
 	# 1. Transfer from bank to GDAX - every week
