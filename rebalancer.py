@@ -12,6 +12,7 @@ import json
 import base64
 import re
 import socket
+import datetime
 from decimal import *
 from pprint import pprint
 from requests.auth import AuthBase
@@ -75,8 +76,8 @@ def logBalances(coinValuesUSD, totalBalance, balances):
 	coins = sorted(totalBalance.keys(), key=lambda c: totalBalance[c] * coinValuesUSD[c], reverse=True)
 	headers = "{}{:<5} | {:<8} ".format(tab, "Coin", "$/c")
 	for b in balances:
-		headers += "|| {:<13} | {:<5} ($) ".format(b, b)
-	headers += "|| {:<13} | {:<5} ($) | (%) ".format("Total", "Total")
+		headers += "|| {:<14} | {:<5} ($) ".format(b, b)
+	headers += "|| {:<14} | {:<5} ($) | (%) ".format("Total", "Total")
 	log(headers)
 	log(re.sub('[^|]', '-', headers))
 	for c in coins:
@@ -84,18 +85,18 @@ def logBalances(coinValuesUSD, totalBalance, balances):
 		row = "{}{:>5} | {:>8.2f} ".format(tab, c, coinValueUSD)
 		for b in balances:
 			if c in balances[b]:
-				row += "|| {:>13.8f} | {:>9.2f} ".format(balances[b][c], balances[b][c] * coinValueUSD)
+				row += "|| {:>14.8f} | {:>9.2f} ".format(balances[b][c], balances[b][c] * coinValueUSD)
 			else:
-				row += "|| {:>13} | {:>9} ".format("", "")
+				row += "|| {:>14} | {:>9} ".format("", "")
 		v = totalBalance[c] * coinValueUSD
-		row += "|| {:>13.8f} | {:>9.2f} | {:>4.1f}".format(totalBalance[c], v, v * 100 / totalUSD)
+		row += "|| {:>14.8f} | {:>9.2f} | {:>4.1f}".format(totalBalance[c], v, v * 100 / totalUSD)
 		log(row)
 	log("")
 
 def logAllocation(coinValuesUSD, allocation, balance, targets):
 	log("")
 	sortedAllocation = sorted(allocation.items(), key=lambda x: x[1], reverse=True)
-	headers = "{}{:<5} | {:<4} | {:<13} | {:<13} | {:<13} | {:<9} | {:<9} | {:<9}".format(
+	headers = "{}{:<5} | {:<4} | {:<14} | {:<14} | {:<14} | {:<9} | {:<9} | {:<9}".format(
 		tab,
 		"Coin",
 		"(%)",
@@ -112,7 +113,7 @@ def logAllocation(coinValuesUSD, allocation, balance, targets):
 		if c[0] in targets:
 			target = targets[c[0]]
 			diff = balance.get(c[0], 0) - target
-			log("{}{:>5} | {:>4.1f} | {:>13.8f} | {:>13.8f} | {:>13.8f} | {:>9.2f} | {:>10.2f} | {:>9.2f}".format(
+			log("{}{:>5} | {:>4.1f} | {:>14.8f} | {:>14.8f} | {:>14.8f} | {:>9.2f} | {:>10.2f} | {:>9.2f}".format(
 				tab,
 				c[0],
 				c[1] * 100,
@@ -123,7 +124,7 @@ def logAllocation(coinValuesUSD, allocation, balance, targets):
 				target * cv,
 				diff * cv))
 		else:
-			log("{}{:>5} | {:>4.1f} | {:>13.8f} | {:>13} | {:>13} | {:>9.2f} | {:>10} | {:>9}".format(
+			log("{}{:>5} | {:>4.1f} | {:>14.8f} | {:>14} | {:>14} | {:>9.2f} | {:>10} | {:>9}".format(
 				tab,
 				c[0],
 				c[1] * 100,
@@ -136,7 +137,17 @@ def logAllocation(coinValuesUSD, allocation, balance, targets):
 		# log(tab + c[0] + ": " + str(c[1]))
 
 def sendEmail():
-	pass
+	dt = datetime.datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d-%H%M%S')
+	filename = "log-" + dt + ".txt"
+	return requests.post(
+		config.MAILGUN_URL,
+		auth=("api", config.MAILGUN_KEY),
+		files=[("attachment", (filename, "\n".join(logs)))],
+		data={"from": config.MAILGUN_EMAIL,
+			  "to": "Joseph Lee <z.joseph.lee.z@gmail.com>",
+			  "subject": "Crypto Balance",
+			  "text": "Here's a log",
+			  "html": "<html>Bunch of HTML</html>"})
 
 #####################
 ####  DB THINGS  ####
@@ -219,10 +230,10 @@ def insertTransfer(type, amt_usd, amt_btc, fee_usd, fee_btc):
 	db.commit()
 
 def insertTrade(exchange, ttype, quantity, price, fee):
-	st = float(quantity) * price
+	st = Decimal(quantity) * price
 	db.cursor().execute(
 		"INSERT INTO trade_log(timestamp, exchange, type, quantity, price, subtotal, fee, total) VALUES (?,?,?,?,?,?,?,?)",
-		(int(time.time()), exchange, ttype, float(quantity), float(price), st, float(fee), st + fee))
+		(int(time.time()), exchange, ttype, float(quantity), float(price), float(st), float(fee), float(st) + float(fee)))
 	db.commit()
 
 ###########################
@@ -290,6 +301,7 @@ def getGDAXBalance():
 	j = makeGDAXGetRequest('accounts')
 	balance = {}
 	balanceUSD = 0
+
 	for details in j:
 		# if float(details["balance"]) > 0 and details["currency"] != 'USD':
 		# 	balance[details["currency"]] = Decimal(stripTrailingZeroes(details["balance"]))
@@ -528,17 +540,18 @@ def combineBalances(balanceList):
 def getMarketValues(coin):
 	if config.COIN_EXCHANGES[coin] == 'GDAX':
 		details = getGDAXMarket(coin + "-USD")
-		return (details['ask'], details['bid'])
+		if details:
+			return (Decimal(details['ask']), Decimal(details['bid']))
 	elif config.COIN_EXCHANGES[coin] == 'BTRX':
 		details = getBTRXMarket("BTC-" + coin)
-		return (details['Ask'], details['Bid'])
-	else:
-		return (None, None)
+		if details:
+			return (Decimal(details['Ask']), Decimal(details['Bid']))
+	return (None, None)
 
 def placeLimitSell(coin, amount, rate, timeout):
 	if config.COIN_EXCHANGES[coin] == 'GDAX':
-		### TODO
-		pass
+		log("gdax, skipping")
+		return True
 	elif config.COIN_EXCHANGES[coin] == 'BTRX':
 		return placeBTRXLimitSell("BTC-" + coin, amount, rate, timeout)
 	else:
@@ -546,26 +559,26 @@ def placeLimitSell(coin, amount, rate, timeout):
 
 def placeLimitBuy(coin, amount, rate, timeout):
 	if config.COIN_EXCHANGES[coin] == 'GDAX':
-		### TODO
-		pass
+		log("gdax, skipping")
+		return True
 	elif config.COIN_EXCHANGES[coin] == 'BTRX':
 		return placeBTRXLimitBuy("BTC-" + coin, amount, rate, timeout)
 	else:
 		return False
 
 def tryToMakeOrder(coin, amount):
-	log("try to make order for {: 13.8f} {}".format(diff, coin))
+	log("try to make order for {: 13.8f} {}".format(amount, coin))
 	(ask, bid) = getMarketValues(coin)
 	if not ask:
 		log("No market found for {}".format(coin))
 		return
-	step = (ask - bid) / float(config.ORDER_RETRIES)
+	step = (ask - bid) / Decimal(config.ORDER_RETRIES)
 
 	tryRate = ask if amount > 0 else bid
 	i = 0
 	success = False
 	while i < config.ORDER_RETRIES:
-		log("# Try {} at {}".format(i, tryRate))
+		log("# Try {} at {: 13.8f}".format(i, tryRate))
 		# TODO - re-look up market?
 		if amount < 0 and placeLimitSell(coin, abs(amount), tryRate, config.ORDER_TIMEOUT):
 			success = True
@@ -578,8 +591,11 @@ def tryToMakeOrder(coin, amount):
 	log("Order successful: {}".format(success))
 
 def makeOrders(coinValuesUSD, balance, targets):
+	log("")
 	orders = []
 	for c in targets:
+		if c == "USD":
+			continue
 		o = checkOrder(c, coinValuesUSD, balance, targets)
 		if o: orders.append(o)
 	orders = sorted(orders, key = lambda o: o[1] * coinValuesUSD[o[0]])
@@ -587,7 +603,7 @@ def makeOrders(coinValuesUSD, balance, targets):
 	log("")
 	log("Ordered orders:")
 	for (c, diff) in orders:
-		log("{:>4} {: 13.8f} {:>5} ({})".format(
+		log("{:>4} {: 13.8f} {:>5} ({: 8.2f})".format(
 			"Sell" if diff < 0 else "Buy",
 			diff if diff > 0 else diff * -1,
 			c,
@@ -607,10 +623,10 @@ def checkOrder(c, coinValuesUSD, balance, targets):
 	value = abs(diff) * coinValuesUSD[c]
 	bigEnoughValue = value > config.REBALANCE_THRESHOLD_VALUE
 	bigEnoughRatio = abs(diff) > have * Decimal(config.REBALANCE_THRESHOLD_RATIO)
-	if bigEnoughValue or bigEnoughRatio:
+	if bigEnoughValue and bigEnoughRatio:
 		return [c, diff]
 	else:
-		log("Too small of an order for {} ({} | {}), skipping".format(c, value, (abs(diff) / have) if have > 0 else 0))
+		log("Too small of an order for {} ({: 13.8} | {: 13.8}), skipping".format(c, value, (abs(diff) / have) if have > 0 else 0))
 		return None
 
 #####################
@@ -643,26 +659,20 @@ if __name__ == "__main__":
 	gdaxBalance, gdaxUSD = getGDAXBalance()
 	btrxBalance = getBTRXBalance()
 	balance = combineBalances([gdaxBalance, btrxBalance])
-	logBalances(coinValuesUSD, balance, {"GDAX": gdaxBalance, "BTRX": btrxBalance})
-
 	balanceUSD = getBalanceTotal(coinValuesUSD, balance)
-	totalUSD = balanceUSD + gdaxUSD
 
+	logBalances(coinValuesUSD, balance, {"GDAX": gdaxBalance, "BTRX": btrxBalance})
 	log("TOTAL BALANCE: {:>9.2f}".format(balanceUSD))
-	log("  NEW BALANCE: {:>9.2f}".format(totalUSD))
 
 	# Get allocations
 	allocation = getAllocation(allDetails, balance)
-	targets = getTargetAmounts(coinValuesUSD, allocation, totalUSD)
+	targets = getTargetAmounts(coinValuesUSD, allocation, balanceUSD)
 	logAllocation(coinValuesUSD, allocation, balance, targets)
 
-	if makeChanges:
+	if True:
 		makeOrders(coinValuesUSD, balance, targets)
 	else:
 		log("[[Skipped making orders]]")
-
-	# if True:
-	# 	sys.exit(1)
 
 	sendEmail()
 
