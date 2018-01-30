@@ -34,7 +34,9 @@ def getLastDepositTime():
 		return time.time()
 
 def shouldDeposit():
-	return getIP() == config.ALLOW_DEPOSIT_IP and time.time() - getLastDepositTime() > DEPOSIT_THRESHOLD
+	return getIP() == config.ALLOW_DEPOSIT_IP and
+		   datetime.datetime.today().day == 1 and
+		   time.time() - getLastDepositTime() > config.DEPOSIT_THRESHOLD
 
 def touch(fname, times=None):
 	with open(fname, 'a'):
@@ -151,7 +153,7 @@ def logOrders(coinValuesUSD, orders):
 			diff * coinValuesUSD[c]))
 	log("")
 
-def sendEmail():
+def sendEmail(balanceUSD):
 	dt = datetime.datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d-%H%M%S')
 	filename = "log-" + dt + ".txt"
 	return requests.post(
@@ -160,7 +162,7 @@ def sendEmail():
 		files=[("attachment", (filename, "\n".join(logs)))],
 		data={"from": config.MAILGUN_EMAIL,
 			  "to": "Joseph Lee <z.joseph.lee.z@gmail.com>",
-			  "subject": "Crypto Log",
+			  "subject": "Crypto Log [{:>9.2f}]".format(balanceUSD),
 			  "html": "<html><pre><code>" + "\n".join(logs) + "</code></pre></html>"})
 
 #####################
@@ -699,7 +701,7 @@ if __name__ == "__main__":
 	if shouldDeposit():
 		if makeChanges:
 			bankId = getGDAXBankAccountId()
-			makeGDAXDeposit(config.WEEKLY_DEPOSIT_AMOUNT, bankId)
+			makeGDAXDeposit(config.MONTHLY_DEPOSIT_AMOUNT, bankId)
 			touch(config.LAST_DEPOSIT_FILE)
 		else:
 			log("[[Skipped making deposit]]")
@@ -732,7 +734,7 @@ if __name__ == "__main__":
 		log("[[Skipped making orders]]")
 
 	if makeChanges:
-		sendEmail()
+		sendEmail(balanceUSD)
 
 	log("")
 	log("Finished")
