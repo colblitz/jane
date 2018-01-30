@@ -34,9 +34,9 @@ def getLastDepositTime():
 		return time.time()
 
 def shouldDeposit():
-	return getIP() == config.ALLOW_DEPOSIT_IP and
-		   datetime.datetime.today().day == 1 and
-		   time.time() - getLastDepositTime() > config.DEPOSIT_THRESHOLD
+	return (getIP() == config.ALLOW_DEPOSIT_IP and
+		    datetime.datetime.today().day == 1 and
+		    time.time() - getLastDepositTime() > config.DEPOSIT_THRESHOLD)
 
 def touch(fname, times=None):
 	with open(fname, 'a'):
